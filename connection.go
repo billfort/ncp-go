@@ -3,6 +3,7 @@ package ncp
 import (
 	"container/heap"
 	"context"
+	"fmt"
 	"log"
 	"math"
 	"sync"
@@ -11,6 +12,16 @@ import (
 	"github.com/golang/protobuf/proto"
 	"github.com/nknorg/ncp-go/pb"
 )
+
+const alpha = 0.1 // exponential smoothing parameter
+
+type stSeqData struct {
+	seq       uint32
+	sendTime  int64
+	acqTime   int64
+	rtt       int64 // round trip time
+	numResend int   // number of sent times
+}
 
 type Connection struct {
 	session          *Session
@@ -23,7 +34,45 @@ type Connection struct {
 	timeSentSeq           map[uint32]time.Time
 	resentSeq             map[uint32]struct{}
 	sendAckQueue          SeqHeap
-	retransmissionTimeout time.Duration
+	retransmissionTimeout time.Duration // RTO
+
+	// FXB
+	tp           int     // recv ack, throughput
+	numTp        int     // number of tp
+	etp          float64 // exponential throughput
+	atp          float64 // average throughput
+	sendTp       int     // send out in ACK interval
+	numUpdateEtp int     // number of update etp
+
+	totalBytesSend int
+	avgBytesSend   float64
+	totalSeqSend   int
+	avgSeqSend     int
+	totalAcqGet    int
+	numTimeout     int         // number of time out seq
+	seqData        []stSeqData // track each seq send and ack time.
+
+	firstSendTime int64 // in ms
+	lastAcqTime   int64 // in ms
+	maxRtt        int64 // in ms
+	minRtt        int64 // in ms
+	avgRtt        int64 // in ms
+	maxRto        int64 // in ms
+	minRto        int64 // in ms
+	avgRto        int64 // in ms
+}
+
+func (conn *Connection) ResetStatic() {
+	conn.firstSendTime = 0
+	conn.lastAcqTime = 0
+	conn.seqData = make([]stSeqData, 0, 1000)
+	conn.totalBytesSend = 0
+	conn.avgBytesSend = 0
+	conn.totalSeqSend = 0
+	conn.avgSeqSend = 0
+	conn.totalAcqGet = 0
+	conn.avgRto = 0
+	conn.avgRtt = 0
 }
 
 func NewConnection(session *Session, localClientID, remoteClientID string) (*Connection, error) {
@@ -37,6 +86,8 @@ func NewConnection(session *Session, localClientID, remoteClientID string) (*Con
 		timeSentSeq:           make(map[uint32]time.Time),
 		resentSeq:             make(map[uint32]struct{}),
 		sendAckQueue:          make(SeqHeap, 0),
+
+		seqData: make([]stSeqData, 0, 1000),
 	}
 	heap.Init(&conn.sendAckQueue)
 	return conn, nil
@@ -76,18 +127,68 @@ func (conn *Connection) ReceiveAck(sequenceID uint32, isSentByMe bool) {
 	}
 
 	if _, ok := conn.resentSeq[sequenceID]; !ok {
-		conn.windowSize++
-		if conn.windowSize > uint32(conn.session.config.MaxConnectionWindowSize) {
-			conn.windowSize = uint32(conn.session.config.MaxConnectionWindowSize)
+		// Previous Version
+		if PreviousVersion {
+			conn.windowSize++
+			if conn.windowSize > uint32(conn.session.config.MaxConnectionWindowSize) {
+				conn.windowSize = uint32(conn.session.config.MaxConnectionWindowSize)
+			}
 		}
 	}
 
 	if isSentByMe {
 		rtt := time.Since(t)
+		rttMs := rtt.Milliseconds()
+		if conn.minRtt == 0 {
+			conn.minRtt = rttMs
+		} else {
+			if rttMs < conn.minRtt {
+				conn.minRtt = rttMs
+			}
+		}
+		if rttMs > conn.maxRtt {
+			conn.maxRtt = rttMs
+		}
+		if conn.avgRtt == 0 {
+			conn.avgRtt = rttMs
+		} else {
+			conn.avgRtt = (conn.avgRtt*(int64)(conn.totalAcqGet) + rttMs) / (int64(conn.totalAcqGet) + 1)
+		}
+
 		conn.retransmissionTimeout += time.Duration(math.Tanh(float64(3*rtt-conn.retransmissionTimeout)/float64(time.Millisecond)/1000) * 100 * float64(time.Millisecond))
 		if conn.retransmissionTimeout > time.Duration(conn.session.config.MaxRetransmissionTimeout)*time.Millisecond {
 			conn.retransmissionTimeout = time.Duration(conn.session.config.MaxRetransmissionTimeout) * time.Millisecond
 		}
+
+		rtoMs := conn.retransmissionTimeout.Milliseconds()
+		if conn.minRto == 0 {
+			conn.minRto = rtoMs
+		} else {
+			if rtoMs < conn.minRto {
+				conn.minRto = rtoMs
+			}
+		}
+		if rtoMs > conn.maxRto {
+			conn.maxRto = rtoMs
+		}
+		if conn.avgRto == 0 {
+			conn.avgRto = rtoMs
+		} else {
+			conn.avgRto = (conn.avgRto*(int64)(conn.totalAcqGet) + rtoMs) / (int64(conn.totalAcqGet) + 1)
+		}
+
+		var seqdata stSeqData
+		now := time.Now().UnixMilli()
+		seqdata.acqTime = now
+		seqdata.sendTime = t.UnixMilli()
+		seqdata.rtt = rtt.Milliseconds()
+		seqdata.seq = sequenceID
+		conn.seqData = append(conn.seqData, seqdata)
+
+		conn.totalAcqGet++
+		conn.lastAcqTime = now
+
+		conn.tp++
 	}
 
 	delete(conn.timeSentSeq, sequenceID)
@@ -154,6 +255,10 @@ func (conn *Connection) tx() error {
 			continue
 		}
 
+		if conn.firstSendTime <= 0 {
+			conn.firstSendTime = time.Now().UnixMilli()
+		}
+
 		err = conn.session.sendWith(conn.localClientID, conn.remoteClientID, buf, conn.retransmissionTimeout)
 		if err != nil {
 			if conn.session.IsClosed() {
@@ -162,7 +267,7 @@ func (conn *Connection) tx() error {
 			if err == ErrConnClosed {
 				return err
 			}
-			log.Println(err)
+			// log.Println(err)
 			select {
 			case conn.session.resendChan <- seq:
 				seq = 0
@@ -177,6 +282,10 @@ func (conn *Connection) tx() error {
 		if _, ok := conn.timeSentSeq[seq]; !ok {
 			conn.timeSentSeq[seq] = time.Now()
 		}
+		conn.totalBytesSend += len(buf)
+		conn.totalSeqSend += 1
+		conn.sendTp++
+
 		delete(conn.resentSeq, seq)
 		conn.Unlock()
 
@@ -200,12 +309,15 @@ func (conn *Connection) sendAck() error {
 		ackSeqCountList := make([]uint32, 0)
 
 		conn.Lock()
+		var totalCount int
 		for conn.sendAckQueue.Len() > 0 && len(ackStartSeqList) < int(conn.session.config.MaxAckSeqListSize) {
 			ackStartSeq := heap.Pop(&conn.sendAckQueue).(uint32)
 			ackSeqCount := uint32(1)
+			totalCount++
 			for conn.sendAckQueue.Len() > 0 && conn.sendAckQueue[0] == NextSeq(ackStartSeq, int64(ackSeqCount)) {
 				heap.Pop(&conn.sendAckQueue)
 				ackSeqCount++
+				totalCount++
 			}
 
 			ackStartSeqList = append(ackStartSeqList, ackStartSeq)
@@ -228,6 +340,7 @@ func (conn *Connection) sendAck() error {
 			AckStartSeq: ackStartSeqList,
 			AckSeqCount: ackSeqCountList,
 			BytesRead:   conn.session.GetBytesRead(),
+			NackSeq:     conn.session.recvWindowStartSeq,
 		})
 		if err != nil {
 			log.Println(err)
@@ -267,10 +380,15 @@ func (conn *Connection) checkTimeout() error {
 				select {
 				case conn.session.resendChan <- seq:
 					conn.resentSeq[seq] = struct{}{}
-					conn.windowSize /= 2
-					if conn.windowSize < uint32(conn.session.config.MinConnectionWindowSize) {
-						conn.windowSize = uint32(conn.session.config.MinConnectionWindowSize)
+					// Previous version
+					if PreviousVersion {
+						conn.windowSize /= 2
+						if conn.windowSize < uint32(conn.session.config.MinConnectionWindowSize) {
+							conn.windowSize = uint32(conn.session.config.MinConnectionWindowSize)
+						}
 					}
+
+					conn.numTimeout++
 				case <-conn.session.context.Done():
 					return conn.session.context.Err()
 				}
@@ -278,4 +396,65 @@ func (conn *Connection) checkTimeout() error {
 		}
 		conn.Unlock()
 	}
+}
+
+// Modify window size according connection's throughpu
+func (conn *Connection) resetTp() {
+	conn.tp = 0
+}
+func (conn *Connection) resetSendTp() {
+	conn.sendTp = 0
+}
+func (conn *Connection) updateEtp() {
+	conn.numTp++
+	floatTp := float64(conn.tp)
+	if conn.etp == 0 {
+		conn.etp = floatTp
+	} else {
+		conn.etp = alpha*floatTp + (1.0-alpha)*(conn.etp)
+	}
+	if conn.atp == 0 {
+		conn.atp = floatTp
+	} else {
+		conn.atp = (conn.atp*(float64(conn.numTp-1)) + floatTp) / float64(conn.numTp)
+	}
+
+}
+
+func (conn *Connection) setWindowSize(n uint32) {
+	if n == 0 {
+		return
+	}
+	if n < uint32(conn.session.config.MinConnectionWindowSize) {
+		n = uint32(conn.session.config.MinConnectionWindowSize)
+	}
+
+	conn.windowSize = n
+
+}
+
+func (conn *Connection) PrintStatic() {
+	if conn.firstSendTime == 0 { // not a sender
+		return
+	}
+
+	fmt.Printf("\n%v connection %v:\n", conn.session.localAddr, conn.localClientID)
+
+	if conn.lastAcqTime == 0 {
+		conn.lastAcqTime = time.Now().UnixMilli()
+	}
+	totalMs := float64(conn.lastAcqTime - conn.firstSendTime)
+
+	// fmt.Printf("totalBytesSend %v, totalSeqSend %v, duration %v ms\n",
+	// 	conn.totalBytesSend, conn.totalSeqSend, totalMs)
+
+	if totalMs > 0 {
+		conn.avgBytesSend = (float64(conn.totalBytesSend) / float64(1<<20)) / (totalMs / 1000.0)
+		conn.avgSeqSend = int(math.Round(float64(conn.totalSeqSend) / (totalMs / 1000.0)))
+		fmt.Printf("avgBytesSend %.3f MB/s, avgSeqSend %v seq/s, number of Timeout seq %v \n",
+			conn.avgBytesSend, conn.avgSeqSend, conn.numTimeout)
+	}
+
+	fmt.Printf("minRtt %v ms maxRtt %v ms avgRtt %v\n", conn.minRtt, conn.maxRtt, conn.avgRtt)
+
 }

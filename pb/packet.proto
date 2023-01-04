@@ -1,6 +1,7 @@
 syntax = "proto3";
 
 package pb;
+option go_package = "./pb";
 
 message Packet {
   uint32 sequence_id = 1;
@@ -13,4 +14,5 @@ message Packet {
   uint32 mtu = 8;
   bool close = 9;
   bool handshake = 10;
+  uint32 nack_seq = 11;
 }
