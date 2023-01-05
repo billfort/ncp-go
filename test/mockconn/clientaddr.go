@@ -1,4 +1,4 @@
-package main
+package mockconn
 
 // ClientAddr represents NKN client address. It implements net.Addr interface.
 type ClientAddr struct {
