@@ -3,125 +3,101 @@ package main
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"log"
-	"math/rand"
-	"sort"
+	"net"
 	"strconv"
-	"sync"
 	"time"
 
-	"github.com/golang/protobuf/proto"
+	"github.com/nknorg/ncp-go/test/mockconn"
+
 	ncp "github.com/nknorg/ncp-go"
-	"github.com/nknorg/ncp-go/pb"
 )
 
 type TestSession struct {
-	sendSess    *ncp.Session
-	recvSess    *ncp.Session
+	localSess   *ncp.Session
+	remoteSess  *ncp.Session
 	mockConfigs map[string]*stMockConfig // map clinetId to mockConfig
 	numClients  int
 
-	sendToRecvChan map[string]chan []byte // map local client id to throughput chan， from sender to receiver
-	recvToSendChan map[string]chan []byte // map local client id to throughput chan, from receiver to sender
-
-	// use fifo slice to control throughput, abandoned.
-	tpMu    sync.Mutex
-	tpTimes map[string]*[]int64 // save the time of sending of last second
-}
-
-func (ts *TestSession) SendToChan(ch chan<- []byte, buf []byte, writeTimeout time.Duration) error {
-	if writeTimeout > 0 {
-		select {
-		case ch <- buf:
-		case <-time.After(writeTimeout):
-			return fmt.Errorf("SendToChan timeout %v", writeTimeout)
-		}
-	} else {
-		ch <- buf
-	}
-
-	return nil
-}
-
-// receiver data from channel by ticker, ticker interval is counted by the throughput
-func (ts *TestSession) RecvFromChan(recvSession *ncp.Session, localClientID, remoteClientID string, ch <-chan []byte, conf *stMockConfig) error {
-
-	tickerDuration := time.Duration(1000000 / conf.throughput) // micro second for ticker
-	ticker := time.NewTicker(tickerDuration * time.Microsecond)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ticker.C:
-			buf := <-ch
-			go func() {
-				recvBuf := buf
-				time.Sleep(time.Duration(conf.latency) * time.Millisecond) // latency
-				recvSession.ReceiveWith(remoteClientID, localClientID, recvBuf)
-			}()
-		}
-	}
-
-	return nil
+	localConns  map[string]net.Conn
+	remoteConns map[string]net.Conn
 }
 
 func (ts *TestSession) Create(confs map[string]*stMockConfig, numClients int) {
 	ts.mockConfigs = confs
-	ts.tpTimes = make(map[string]*[]int64)
-	ts.sendToRecvChan = make(map[string]chan []byte, numClients)
-	ts.recvToSendChan = make(map[string]chan []byte, numClients)
+
+	ts.localConns = make(map[string]net.Conn)
+	ts.remoteConns = make(map[string]net.Conn)
 
 	clientIDs := make([]string, 0)
 	for i := 0; i < numClients; i++ {
 		clientId := strconv.Itoa(i)
 		clientIDs = append(clientIDs, clientId)
-
-		ch1 := make(chan []byte, 0)
-		ts.sendToRecvChan[clientId] = ch1
-		ch2 := make(chan []byte, 0)
-		ts.recvToSendChan[clientId] = ch2
+		conf := confs[clientId]
+		localConn, remoteConn, err := mockconn.NewMockConn("Alice_"+clientId, "Bob_"+clientId,
+			conf.throughput, conf.bufferSize, conf.latency)
+		if err == nil {
+			ts.localConns[clientId] = localConn
+			ts.remoteConns[clientId] = remoteConn
+		} else {
+			log.Fatalln("mockconn.NewMockConn err:%v", err)
+		}
 	}
 
 	sessionConfig := &ncp.Config{}
 
-	sendSess, _ := ncp.NewSession(NewClientAddr("Alice"), NewClientAddr("Bob"), clientIDs, clientIDs,
-		func(localClientID, remoteClientID string, buf []byte, writeTimeout time.Duration) error {
-			ch, ok := ts.sendToRecvChan[localClientID]
-			if !ok {
-				return fmt.Errorf("can't get sendToRecvChan channel of localIentID %v", localClientID)
+	localSess, _ := ncp.NewSession(mockconn.NewClientAddr("Alice"), mockconn.NewClientAddr("Bob"), clientIDs, clientIDs,
+		func(localClientID, remoteClientID string, buf []byte, writeTimeout time.Duration) (err error) {
+			netconn, ok := ts.localConns[localClientID]
+			if ok {
+				_, err = netconn.Write(buf)
+			} else {
+				err = errors.New("Sendwith can't get connection")
 			}
-			return ts.SendToChan(ch, buf, writeTimeout)
+			return err
 		}, sessionConfig)
 
-	recvSess, _ := ncp.NewSession(NewClientAddr("Bob"), NewClientAddr("Alice"), clientIDs, clientIDs,
-		func(localClientID, remoteClientID string, buf []byte, writeTimeout time.Duration) error {
-
-			ch, ok := ts.recvToSendChan[localClientID]
-			if !ok {
-				return fmt.Errorf("can't get recvToSendChan channel of localIentID %v", localClientID)
+	remoteSess, _ := ncp.NewSession(mockconn.NewClientAddr("Bob"), mockconn.NewClientAddr("Alice"), clientIDs, clientIDs,
+		func(localClientID, remoteClientID string, buf []byte, writeTimeout time.Duration) (err error) {
+			conn, ok := ts.remoteConns[localClientID]
+			if ok {
+				_, err = conn.Write(buf)
+			} else {
+				err = errors.New("Sendwith can't get connection")
 			}
-			return ts.SendToChan(ch, buf, writeTimeout)
+			return err
 		}, sessionConfig)
 
-	ts.sendSess = sendSess
-	ts.recvSess = recvSess
+	ts.localSess = localSess
+	ts.remoteSess = remoteSess
 
-	for _, localClientID := range clientIDs {
-		ch, ok := ts.sendToRecvChan[localClientID]
-		if !ok {
-
+	go func() {
+		for clientId, conn := range ts.localConns {
+			go ts.networkRead(ts.localSess, conn, clientId)
 		}
-		conf := ts.mockConfigs[localClientID]
-		go ts.RecvFromChan(ts.recvSess, localClientID, localClientID, ch, conf)
-	}
+		for clientId, conn := range ts.remoteConns {
+			go ts.networkRead(ts.remoteSess, conn, clientId)
+		}
+	}()
 
-	for _, localClientID := range clientIDs {
-		ch := ts.recvToSendChan[localClientID]
-		conf := ts.mockConfigs[localClientID]
-		go ts.RecvFromChan(ts.sendSess, localClientID, localClientID, ch, conf)
-	}
+}
 
+func (ts *TestSession) networkRead(s *ncp.Session, conn net.Conn, clientId string) {
+	for {
+		b := make([]byte, 1500)
+		n, err := conn.Read(b)
+		if err != nil {
+			log.Fatalf("%v read error: %v\n", conn.LocalAddr().String(), err)
+			time.Sleep(10 * time.Millisecond)
+			continue
+		}
+		err = s.ReceiveWith(clientId, clientId, b[:n])
+		if err != nil {
+			fmt.Printf("%v ts.remoteSess.ReceiveWith error: %v\n", conn.LocalAddr().String(), err)
+		}
+	}
 }
 
 func (ts *TestSession) DialUp() {
@@ -129,7 +105,7 @@ func (ts *TestSession) DialUp() {
 	go func() {
 		for {
 			time.Sleep(200 * time.Millisecond)
-			err := ts.recvSess.Accept()
+			err := ts.remoteSess.Accept()
 			if err == nil {
 				break
 			}
@@ -137,9 +113,9 @@ func (ts *TestSession) DialUp() {
 	}()
 
 	ctx := context.Background()
-	err := ts.sendSess.Dial(ctx)
+	err := ts.localSess.Dial(ctx)
 	if err != nil {
-		fmt.Printf("ts.sendSess.Dial error: %v\n", err)
+		fmt.Printf("ts.localSess.Dial error: %v\n", err)
 		return
 	}
 
@@ -227,112 +203,4 @@ func (ts *TestSession) read(s *ncp.Session, readChan chan int64) error {
 			return nil
 		}
 	}
-}
-
-// use fifo slice to control throughput, abandoned.
-func (ts *TestSession) IsOverThroughput(localClientID string) error {
-	ts.tpMu.Lock()
-	defer ts.tpMu.Unlock()
-
-	conf := ts.mockConfigs[localClientID]
-	tpTimes := ts.tpTimes[localClientID]
-	now := time.Now().UnixMilli()
-
-	n := len(*tpTimes)
-	if n < conf.throughput {
-		*tpTimes = append(*tpTimes, now)
-		return nil
-	}
-
-	thresh := now - 1000 // threshold for the last 1 second
-
-	pos := sort.Search(n, func(i int) bool {
-		return (*tpTimes)[i] > thresh
-	})
-	if pos != n {
-		*tpTimes = (*tpTimes)[pos:]
-	} else {
-		*tpTimes = make([]int64, 0)
-	}
-	ts.tpTimes[localClientID] = tpTimes
-
-	if len(*tpTimes) >= conf.throughput {
-		return fmt.Errorf("Conn %v has sent %v in last second, over throughput %v now.",
-			localClientID, len(*tpTimes), conf.throughput)
-	}
-
-	*tpTimes = append(*tpTimes, now)
-
-	return nil
-
-}
-
-// use fifo slice to control throughput, abandoned.
-func (ts *TestSession) Create0(confs map[string]*stMockConfig, numClients int) {
-	ts.mockConfigs = confs
-	ts.tpTimes = make(map[string]*[]int64)
-
-	clientIDs := make([]string, 0)
-	for i := 0; i < numClients; i++ {
-		clientId := strconv.Itoa(i)
-		clientIDs = append(clientIDs, clientId)
-		s := make([]int64, 0)
-		ts.tpTimes[clientId] = &s
-	}
-
-	sessionConfig := &ncp.Config{}
-
-	sendSess, _ := ncp.NewSession(NewClientAddr("Alice"), NewClientAddr("Bob"), clientIDs, clientIDs,
-		func(localClientID, remoteClientID string, buf []byte, writeTimeout time.Duration) error {
-			conf := ts.mockConfigs[localClientID]
-
-			if err := ts.IsOverThroughput(localClientID); err != nil {
-				return err
-			}
-
-			packet := &pb.Packet{}
-			err := proto.Unmarshal(buf, packet)
-			if err != nil {
-				return err
-			}
-
-			rand.Seed(time.Now().UnixNano())
-			ms := rand.Intn(1)
-			time.Sleep(time.Duration(ms) * time.Millisecond) // stimulate real network time consuming
-
-			go func() {
-				droped := randDropAndLatency(conf, localClientID, remoteClientID)
-				if droped {
-					return
-				}
-
-				ts.recvSess.ReceiveWith(remoteClientID, localClientID, buf)
-			}()
-
-			return nil
-		}, sessionConfig)
-
-	recvSess, _ := ncp.NewSession(NewClientAddr("Bob"), NewClientAddr("Alice"), clientIDs, clientIDs,
-		func(localClientID, remoteClientID string, buf []byte, writeTimeout time.Duration) error {
-
-			rand.Seed(time.Now().UnixNano())
-			ms := rand.Intn(1)
-			time.Sleep(time.Duration(ms) * time.Millisecond) // stimulate real network time consuming
-
-			go func() { // receiver
-				conf := ts.mockConfigs[localClientID]
-				droped := randDropAndLatency(conf, remoteClientID, localClientID)
-				if droped {
-					return
-				}
-
-				ts.sendSess.ReceiveWith(remoteClientID, localClientID, buf)
-			}()
-
-			return nil
-		}, sessionConfig)
-
-	ts.sendSess = sendSess
-	ts.recvSess = recvSess
-
 }

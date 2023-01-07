@@ -3,13 +3,14 @@ package mockconn
 import (
 	"encoding/binary"
 	"log"
+	"net"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
 )
 
-func WriteAndRead(writer *netConn, reader *netConn, nPackets int) (sendSeq []int64, recvSeq []int64) {
+func WriteAndRead(writer net.Conn, reader net.Conn, nPackets int, latency time.Duration) (sendSeq []int64, recvSeq []int64) {
 
 	ch := make(chan struct{}, 2)
 
@@ -32,7 +33,7 @@ func WriteAndRead(writer *netConn, reader *netConn, nPackets int) (sendSeq []int
 		t2 := time.Now().UnixMilli()
 		throughput := float64(count*1000) / float64(t2-t1)
 
-		log.Printf("%v send %v packets in %v ms, throughput is: %.1f packets/s \n", writer.connName, count, t2-t1, throughput)
+		log.Printf("%v send %v packets in %v ms, throughput is: %.1f packets/s \n", writer.LocalAddr(), count, t2-t1, throughput)
 		ch <- struct{}{}
 	}()
 
@@ -50,10 +51,15 @@ func WriteAndRead(writer *netConn, reader *netConn, nPackets int) (sendSeq []int
 			count++
 		}
 		t2 := time.Now().UnixMilli()
-		throughput := float64(count*1000) / float64(t2-t1)
+		ms := latency.Milliseconds()
+		throughput := float64(count*1000) / float64(t2-t1-ms)
 
-		log.Printf("%v read %v packets in %v ms, throughput is: %.1f packets/s \n", reader.connName, count, t2-t1, throughput)
-		reader.PrintMetrics()
+		log.Printf("%v read %v packets in %v ms, deduct %v latency, throughput is: %.1f packets/s \n",
+			reader.LocalAddr(), count, t2-t1, ms, throughput)
+		nc, ok := reader.(*netConn)
+		if ok {
+			nc.PrintMetrics()
+		}
 		ch <- struct{}{}
 	}()
 
@@ -67,43 +73,43 @@ func WriteAndRead(writer *netConn, reader *netConn, nPackets int) (sendSeq []int
 func TestBidirection(t *testing.T) {
 
 	throughput := uint(16)
-	latency := int64(100) // ms
+	latency := 100 * time.Millisecond // ms
 	bufferSize := uint(32)
 
-	log.Printf("Going to test bi-direction communicating, throughput is %v, latency is %v ms\n", throughput, latency)
+	log.Printf("Going to test bi-direction communicating, throughput is %v, latency is %v \n", throughput, latency)
 
-	leftConn, rightConn, err := NewMockConn("0", "0", throughput, bufferSize, latency)
-	require.NotNil(t, leftConn)
-	require.NotNil(t, rightConn)
+	aliceConn, bobConn, err := NewMockConn("Alice", "Bob", throughput, bufferSize, latency)
+	require.NotNil(t, aliceConn)
+	require.NotNil(t, bobConn)
 	require.Nil(t, err)
 
 	// left write to right
 	nPackets := 100
 	i := 0
-	sendSeq, recvSeq := WriteAndRead(leftConn, rightConn, nPackets)
+	sendSeq, recvSeq := WriteAndRead(aliceConn, bobConn, nPackets, latency)
 	for i = 0; i < nPackets; i++ {
 		if sendSeq[i] != recvSeq[i] {
 			log.Printf("%v sendSeq[%v] %v != %v recvSeq[%v] %v \n",
-				leftConn.connName, i, sendSeq[i], rightConn.connName, i, recvSeq[i])
+				aliceConn.LocalAddr(), i, sendSeq[i], bobConn.LocalAddr(), i, recvSeq[i])
 		}
 	}
 	if i == nPackets {
 		log.Printf("%v write to %v %v packets, %v receive %v packets in the same sequence\n",
-			leftConn.connName, rightConn.connName, nPackets, rightConn.connName, nPackets)
+			aliceConn.LocalAddr(), bobConn.LocalAddr(), nPackets, bobConn.LocalAddr(), nPackets)
 	}
 
 	// right write to left
 	nPackets = 50
-	sendSeq, recvSeq = WriteAndRead(rightConn, leftConn, nPackets)
+	sendSeq, recvSeq = WriteAndRead(bobConn, aliceConn, nPackets, latency)
 	for i = 0; i < nPackets; i++ {
 		if sendSeq[i] != recvSeq[i] {
 			log.Printf("%v sendSeq[%v] %v != %v recvSeq[%v] %v \n",
-				rightConn.connName, i, sendSeq[i], leftConn.connName, i, recvSeq[i])
+				bobConn.LocalAddr(), i, sendSeq[i], aliceConn.LocalAddr(), i, recvSeq[i])
 		}
 	}
 	if i == nPackets {
 		log.Printf("%v write to %v %v packets, %v receive %v packets in the same sequence\n",
-			rightConn.connName, leftConn.connName, nPackets, leftConn.connName, nPackets)
+			bobConn.LocalAddr(), aliceConn.LocalAddr(), nPackets, aliceConn.LocalAddr(), nPackets)
 	}
 
 }
@@ -111,52 +117,52 @@ func TestBidirection(t *testing.T) {
 // go test -v -run=TestLowThroughput
 func TestLowThroughput(t *testing.T) {
 	throughput := uint(16)
-	latency := int64(20) // ms
+	latency := 20 * time.Millisecond // ms
 	bufferSize := 2 * throughput
 
-	log.Printf("Going to test low throughput at %v packets/s, latency %v ms\n", throughput, latency)
+	log.Printf("Going to test low throughput at %v packets/s, latency %v\n", throughput, latency)
 
-	leftConn, rightConn, err := NewMockConn("0", "0", throughput, bufferSize, latency)
-	require.NotNil(t, leftConn)
-	require.NotNil(t, rightConn)
+	aliceConn, bobConn, err := NewMockConn("Alice", "Bob", throughput, bufferSize, latency)
+	require.NotNil(t, aliceConn)
+	require.NotNil(t, bobConn)
 	require.Nil(t, err)
 
 	nPackets := 256
-	WriteAndRead(leftConn, rightConn, nPackets)
+	WriteAndRead(aliceConn, bobConn, nPackets, latency)
 
 }
 
 // go test -v -run=TestHighThroughput
 func TestHighThroughput(t *testing.T) {
 	throughput := uint(512)
-	latency := int64(20) // ms
+	latency := 20 * time.Millisecond // ms
 	bufferSize := 2 * throughput
 
-	log.Printf("Going to test high throughput at %v packets/s, latency %v ms\n", throughput, latency)
+	log.Printf("Going to test high throughput at %v packets/s, latency %v\n", throughput, latency)
 
-	leftConn, rightConn, err := NewMockConn("0", "0", throughput, bufferSize, latency)
-	require.NotNil(t, leftConn)
-	require.NotNil(t, rightConn)
+	aliceConn, bobConn, err := NewMockConn("Alice", "Bob", throughput, bufferSize, latency)
+	require.NotNil(t, aliceConn)
+	require.NotNil(t, bobConn)
 	require.Nil(t, err)
 
 	nPackets := 1024
-	WriteAndRead(leftConn, rightConn, nPackets)
+	WriteAndRead(aliceConn, bobConn, nPackets, latency)
 }
 
 // go test -v -run=TestHighLatency
 func TestHighLatency(t *testing.T) {
 	throughput := uint(128)
-	latency := int64(500) // ms
+	latency := 500 * time.Millisecond // ms
 	bufferSize := 2 * throughput
 
-	log.Printf("Going to test throughput at %v packets/s, high latency %v ms\n", throughput, latency)
+	log.Printf("Going to test throughput at %v packets/s, high latency %v\n", throughput, latency)
 
-	leftConn, rightConn, err := NewMockConn("0", "0", throughput, bufferSize, latency)
-	require.NotNil(t, leftConn)
-	require.NotNil(t, rightConn)
+	aliceConn, bobConn, err := NewMockConn("Alice", "Bob", throughput, bufferSize, latency)
+	require.NotNil(t, aliceConn)
+	require.NotNil(t, bobConn)
 	require.Nil(t, err)
 
 	nPackets := 256
-	WriteAndRead(leftConn, rightConn, nPackets)
+	WriteAndRead(aliceConn, bobConn, nPackets, latency)
 
 }
