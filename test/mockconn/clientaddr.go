@@ -11,7 +11,7 @@ func NewClientAddr(addr string) *ClientAddr {
 }
 
 // Network returns "nkn"
-func (addr ClientAddr) Network() string { return "nkn" }
+func (addr ClientAddr) Network() string { return "mockconn" }
 
 // String returns the NKN client address string.
 func (addr ClientAddr) String() string { return addr.addr }

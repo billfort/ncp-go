@@ -5,17 +5,31 @@ import (
 	"time"
 )
 
+// The config to mock out an connection
+// a connection has two address represent two end points Addr1 and Addr2.
+// here we refer them as lAddr and rAddr. They can be any string you would like.
+// such as Alice, Bob or any other meaningful for your application.
+type ConnConfig struct {
+	Addr1      string
+	Addr2      string
+	Throughput uint
+	BufferSize uint
+	Latency    time.Duration
+	Loss       float32 // 0.01 = 1%
+}
+
 type mockConn struct {
 	localConn  net.Conn
 	remoteConn net.Conn
 }
 
-func NewMockConn(localAddr, remoteAddr string, throughput, bufferSize uint, latency time.Duration) (net.Conn, net.Conn, error) {
-	l2rUniConn, err := NewUniConn(localAddr, remoteAddr, throughput, bufferSize, latency)
+func NewMockConn(conf *ConnConfig) (net.Conn, net.Conn, error) {
+	l2rUniConn, err := NewUniConn(conf)
 	if err != nil {
 		return nil, nil, err
 	}
-	r2lUniConn, err := NewUniConn(remoteAddr, localAddr, throughput, bufferSize, latency)
+	conf.Addr1, conf.Addr2 = conf.Addr2, conf.Addr1 // switch address
+	r2lUniConn, err := NewUniConn(conf)
 	if err != nil {
 		return nil, nil, err
 	}

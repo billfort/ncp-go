@@ -10,22 +10,21 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/nknorg/ncp-go/test/mockconn"
-
 	ncp "github.com/nknorg/ncp-go"
+	"github.com/nknorg/ncp-go/test/mockconn"
 )
 
 type TestSession struct {
 	localSess   *ncp.Session
 	remoteSess  *ncp.Session
-	mockConfigs map[string]*stMockConfig // map clinetId to mockConfig
+	mockConfigs map[string]*mockconn.ConnConfig // map clinetId to mockConfig
 	numClients  int
 
 	localConns  map[string]net.Conn
 	remoteConns map[string]net.Conn
 }
 
-func (ts *TestSession) Create(confs map[string]*stMockConfig, numClients int) {
+func (ts *TestSession) Create(confs map[string]*mockconn.ConnConfig, numClients int) {
 	ts.mockConfigs = confs
 
 	ts.localConns = make(map[string]net.Conn)
@@ -36,8 +35,7 @@ func (ts *TestSession) Create(confs map[string]*stMockConfig, numClients int) {
 		clientId := strconv.Itoa(i)
 		clientIDs = append(clientIDs, clientId)
 		conf := confs[clientId]
-		localConn, remoteConn, err := mockconn.NewMockConn("Alice_"+clientId, "Bob_"+clientId,
-			conf.throughput, conf.bufferSize, conf.latency)
+		localConn, remoteConn, err := mockconn.NewMockConn(conf)
 		if err == nil {
 			ts.localConns[clientId] = localConn
 			ts.remoteConns[clientId] = remoteConn

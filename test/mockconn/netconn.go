@@ -1,58 +1,98 @@
 package mockconn
 
 import (
+	"errors"
 	"net"
 	"time"
 )
 
-type netConn struct {
-	sendConn *uniConn
-	recvConn *uniConn
+var (
+	ErrConnNotEstablished error = errors.New("NetConn is not established")
+)
+
+type NetConn struct {
+	sendConn *UniConn
+	recvConn *UniConn
 }
 
 // Am implement of net.Conn interface
-func NewNetConn(sendConn, recvConn *uniConn) *netConn {
-	nc := &netConn{sendConn: sendConn, recvConn: recvConn}
+func NewNetConn(sendConn, recvConn *UniConn) *NetConn {
+	nc := &NetConn{sendConn: sendConn, recvConn: recvConn}
 	return nc
 }
 
-func (nc *netConn) Write(b []byte) (n int, err error) {
+func (nc *NetConn) Write(b []byte) (n int, err error) {
+	if nc.sendConn == nil {
+		return 0, ErrConnNotEstablished
+	}
 	return nc.sendConn.Write(b)
 }
 
-func (nc *netConn) Read(b []byte) (n int, err error) {
+func (nc *NetConn) Read(b []byte) (n int, err error) {
+	if nc.recvConn == nil {
+		return 0, ErrConnNotEstablished
+	}
 	return nc.recvConn.Read(b)
 }
 
-func (nc *netConn) Close() error {
-	nc.sendConn.Close()
+func (nc *NetConn) Close() error {
+	if nc.sendConn == nil {
+		return ErrConnNotEstablished
+	}
+	return nc.sendConn.Close()
+}
+
+func (nc *NetConn) LocalAddr() net.Addr {
+	if nc.sendConn == nil {
+		return nil
+	}
+	return nc.sendConn.LocalAddr()
+}
+
+func (nc *NetConn) RemoteAddr() net.Addr {
+	if nc.sendConn == nil {
+		return nil
+	}
+	return nc.sendConn.RemoteAddr()
+}
+
+func (nc *NetConn) SetDeadline(t time.Time) error {
+	if nc.sendConn == nil {
+		return ErrConnNotEstablished
+	}
+	if nc.recvConn == nil {
+		return ErrConnNotEstablished
+	}
+
+	err := nc.sendConn.SetDeadline(t)
+	if err != nil {
+		return err
+	}
+	err = nc.recvConn.SetDeadline(t)
+	if err != nil {
+		return err
+	}
 
 	return nil
 }
 
-func (nc *netConn) LocalAddr() net.Addr {
-	return ClientAddr{addr: nc.sendConn.localAddr}
-}
-
-func (nc *netConn) RemoteAddr() net.Addr {
-	return ClientAddr{addr: nc.sendConn.remoteAddr}
-}
-
-func (nc *netConn) SetDeadline(t time.Time) error {
-	nc.sendConn.SetDeadline(t)
-	nc.recvConn.SetDeadline(t)
-
-	return nil
-}
-
-func (nc *netConn) SetReadDeadline(t time.Time) error {
+func (nc *NetConn) SetReadDeadline(t time.Time) error {
+	if nc.recvConn == nil {
+		return ErrConnNotEstablished
+	}
 	return nc.recvConn.SetReadDeadline(t)
 }
 
-func (nc *netConn) SetWriteDeadline(t time.Time) error {
+func (nc *NetConn) SetWriteDeadline(t time.Time) error {
+	if nc.sendConn == nil {
+		return ErrConnNotEstablished
+	}
 	return nc.sendConn.SetWriteDeadline(t)
 }
 
-func (nc *netConn) PrintMetrics() {
+func (nc *NetConn) PrintMetrics() {
+	if nc.recvConn == nil {
+		return
+	}
 	nc.recvConn.PrintMetrics()
 }
