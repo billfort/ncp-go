@@ -259,6 +259,20 @@ func (conn *Connection) tx() error {
 			conn.firstSendTime = time.Now().UnixMilli()
 		}
 
+		// FXB
+		var d TestData
+		if len(buf) > 52 {
+			pack := pb.Packet{}
+			proto.Unmarshal(buf, &pack)
+			(&d).Dec(pack.Data)
+			d.ConnSend = time.Now().UnixMilli()
+			b := d.Enc()
+			ReplaceTestData(pack.Data, b)
+			buf, _ = proto.Marshal(&pack)
+		}
+
+		// fmt.Printf("ts.send:%v, sess.send:%v, conn.tx:%v\n", d.TestSend, d.SessSend, d.ConnSend)
+
 		err = conn.session.sendWith(conn.localClientID, conn.remoteClientID, buf, conn.retransmissionTimeout)
 		if err != nil {
 			if conn.session.IsClosed() {
@@ -438,15 +452,12 @@ func (conn *Connection) PrintStatic() {
 		return
 	}
 
-	fmt.Printf("\n%v connection %v:\n", conn.session.localAddr, conn.localClientID)
+	fmt.Printf("%v connection %v:\n", conn.session.localAddr, conn.localClientID)
 
 	if conn.lastAcqTime == 0 {
 		conn.lastAcqTime = time.Now().UnixMilli()
 	}
 	totalMs := float64(conn.lastAcqTime - conn.firstSendTime)
-
-	// fmt.Printf("totalBytesSend %v, totalSeqSend %v, duration %v ms\n",
-	// 	conn.totalBytesSend, conn.totalSeqSend, totalMs)
 
 	if totalMs > 0 {
 		conn.avgBytesSend = (float64(conn.totalBytesSend) / float64(1<<20)) / (totalMs / 1000.0)

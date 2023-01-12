@@ -1,6 +1,6 @@
 package mockconn
 
-// ClientAddr represents NKN client address. It implements net.Addr interface.
+// ClientAddr represents MockConn client address. It implements net.Addr interface.
 type ClientAddr struct {
 	addr string
 }

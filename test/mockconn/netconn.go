@@ -15,7 +15,7 @@ type NetConn struct {
 	recvConn *UniConn
 }
 
-// Am implement of net.Conn interface
+// An implement of net.Conn interface
 func NewNetConn(sendConn, recvConn *UniConn) *NetConn {
 	nc := &NetConn{sendConn: sendConn, recvConn: recvConn}
 	return nc
@@ -36,10 +36,14 @@ func (nc *NetConn) Read(b []byte) (n int, err error) {
 }
 
 func (nc *NetConn) Close() error {
-	if nc.sendConn == nil {
+	if nc.sendConn == nil || nc.recvConn == nil {
 		return ErrConnNotEstablished
 	}
-	return nc.sendConn.Close()
+
+	nc.sendConn.CloseWrite()
+	nc.recvConn.CloseRead()
+
+	return nil
 }
 
 func (nc *NetConn) LocalAddr() net.Addr {

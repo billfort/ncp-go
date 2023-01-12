@@ -18,27 +18,23 @@ type ConnConfig struct {
 	Loss       float32 // 0.01 = 1%
 }
 
-type mockConn struct {
-	localConn  net.Conn
-	remoteConn net.Conn
-}
-
+// Mock network connection
+// Return two net.Conn(s) which represent two endpoints of this connection.
 func NewMockConn(conf *ConnConfig) (net.Conn, net.Conn, error) {
-	l2rUniConn, err := NewUniConn(conf)
+	l2r, err := NewUniConn(conf)
 	if err != nil {
 		return nil, nil, err
 	}
+
 	conf.Addr1, conf.Addr2 = conf.Addr2, conf.Addr1 // switch address
-	r2lUniConn, err := NewUniConn(conf)
+	r2l, err := NewUniConn(conf)
 	if err != nil {
 		return nil, nil, err
 	}
 
-	localConn := NewNetConn(l2rUniConn, r2lUniConn)
-	remoteConn := NewNetConn(r2lUniConn, l2rUniConn)
+	localConn := NewNetConn(l2r, r2l)
+	remoteConn := NewNetConn(r2l, l2r)
 
-	mc := &mockConn{localConn: localConn, remoteConn: remoteConn}
-
-	return mc.localConn, mc.remoteConn, nil
+	return localConn, remoteConn, nil
 
 }

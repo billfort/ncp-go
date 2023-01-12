@@ -1,4 +1,4 @@
-package main
+package test
 
 import (
 	"context"
@@ -10,6 +10,9 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/nknorg/ncp-go/pb"
+
+	"github.com/golang/protobuf/proto"
 	ncp "github.com/nknorg/ncp-go"
 	"github.com/nknorg/ncp-go/test/mockconn"
 )
@@ -22,6 +25,8 @@ type TestSession struct {
 
 	localConns  map[string]net.Conn
 	remoteConns map[string]net.Conn
+
+	closeChan chan struct{} // indicate this session is closed
 }
 
 func (ts *TestSession) Create(confs map[string]*mockconn.ConnConfig, numClients int) {
@@ -29,6 +34,7 @@ func (ts *TestSession) Create(confs map[string]*mockconn.ConnConfig, numClients 
 
 	ts.localConns = make(map[string]net.Conn)
 	ts.remoteConns = make(map[string]net.Conn)
+	ts.closeChan = make(chan struct{})
 
 	clientIDs := make([]string, 0)
 	for i := 0; i < numClients; i++ {
@@ -40,7 +46,7 @@ func (ts *TestSession) Create(confs map[string]*mockconn.ConnConfig, numClients 
 			ts.localConns[clientId] = localConn
 			ts.remoteConns[clientId] = remoteConn
 		} else {
-			log.Fatalln("mockconn.NewMockConn err:%v", err)
+			log.Fatalln("mockconn.NewMockConn err:", err)
 		}
 	}
 
@@ -83,19 +89,53 @@ func (ts *TestSession) Create(confs map[string]*mockconn.ConnConfig, numClients 
 }
 
 func (ts *TestSession) networkRead(s *ncp.Session, conn net.Conn, clientId string) {
+	count := 0
+	var zeroTime time.Time
+	var t1 time.Time
+	// var dur time.Duration
+
+loop:
 	for {
 		b := make([]byte, 1500)
 		n, err := conn.Read(b)
 		if err != nil {
-			log.Fatalf("%v read error: %v\n", conn.LocalAddr().String(), err)
-			time.Sleep(10 * time.Millisecond)
-			continue
+			// fmt.Printf("%v testsession.networkRead conn.Read error: %v\n", conn.LocalAddr().String(), err)
+			break
 		}
+		if t1 == zeroTime {
+			t1 = time.Now()
+		}
+
+		if n > 52 {
+			var d ncp.TestData
+			pack := pb.Packet{}
+			proto.Unmarshal(b, &pack)
+			(&d).Dec(pack.Data)
+			d.ConnRecv = time.Now().UnixMilli()
+			bb := d.Enc()
+			ncp.ReplaceTestData(pack.Data, bb)
+			b, _ = proto.Marshal(&pack)
+
+			// fmt.Printf("ts.send:%v, sess.send:%v, conn.tx:%v, networkRead:%v\n",
+			// 	d.TestSend, d.SessSend, d.ConnSend, d.ConnRecv)
+		}
+
 		err = s.ReceiveWith(clientId, clientId, b[:n])
 		if err != nil {
-			fmt.Printf("%v ts.remoteSess.ReceiveWith error: %v\n", conn.LocalAddr().String(), err)
+			fmt.Printf("%v testsession.networkRead s.ReceiveWith error: %v\n", conn.LocalAddr().String(), err)
+		}
+		count++
+		// dur = time.Since(t1)
+
+		select {
+		case <-ts.closeChan:
+			break loop
+		default:
 		}
 	}
+
+	// fmt.Printf("%v testsession.networkRead, throughput is %.1f \n", conn.LocalAddr().String(), float64(count)/dur.Seconds())
+	ts.closeChan <- struct{}{}
 }
 
 func (ts *TestSession) DialUp() {
@@ -120,7 +160,7 @@ func (ts *TestSession) DialUp() {
 }
 
 func (ts *TestSession) write(s *ncp.Session, numBytes int, writeChan chan int64) error {
-	timeStart := time.Now().UnixMilli()
+	t1 := time.Now().UnixMilli()
 
 	b := make([]byte, 4)
 	binary.LittleEndian.PutUint32(b, uint32(numBytes))
@@ -129,27 +169,34 @@ func (ts *TestSession) write(s *ncp.Session, numBytes int, writeChan chan int64)
 		return err
 	}
 
-	var bytesSent int64
+	d := ncp.TestData{}
+
+	var bytesSent, count int64
 	for i := 0; i < numBytes/1024; i++ {
 		b := make([]byte, 1024)
-		for j := 0; j < len(b); j++ {
-			b[j] = byte(bytesSent % 256)
-			bytesSent++
-		}
+
+		d.TestSend = time.Now().UnixMilli()
+		db := d.Enc()
+		ncp.ReplaceTestData(b, db)
+
 		n, err := s.Write(b)
 		if err != nil {
+			log.Fatal("testsession.write s.Write err ", err)
 			return err
 		}
 		if n != len(b) {
 			return fmt.Errorf("sent %d instead of %d bytes", n, len(b))
 		}
+		bytesSent += int64(len(b))
+		count++
 	}
 
-	timeEnd := time.Now().UnixMilli()
+	t2 := time.Now().UnixMilli()
 
 	writeChan <- bytesSent
-	writeChan <- timeStart
-	writeChan <- timeEnd
+	writeChan <- count
+	writeChan <- t1
+	writeChan <- t2
 
 	return nil
 
@@ -173,32 +220,42 @@ func (ts *TestSession) read(s *ncp.Session, readChan chan int64) error {
 	}
 
 	numBytes := int(binary.LittleEndian.Uint32(b))
-	// fmt.Printf("%v Going to read %v bytes\n", s.LocalAddr(), numBytes)
 
 	b = make([]byte, 1024)
-	var bytesReceived int64
+	var bytesReceived, count int64
 
 	for {
 		n, err := s.Read(b)
 		if err != nil {
-			log.Fatal("s.Read err ", err)
+			log.Fatal("testsession.read s.Read err ", err)
 			return err
 		}
-		for i := 0; i < n; i++ {
-			if b[i] != byte(bytesReceived%256) {
-				return fmt.Errorf("byte %d should be %d, got %d", bytesReceived, bytesReceived%256, b[i])
-			}
-			bytesReceived++
-		}
+		bytesReceived += int64(n)
+		count++
 
 		if bytesReceived == int64(numBytes) {
 			timeEnd := time.Now().UnixMilli()
 
 			readChan <- bytesReceived
+			readChan <- count
 			readChan <- timeStart
 			readChan <- timeEnd
 
 			return nil
 		}
 	}
+}
+
+func (ts *TestSession) Close() {
+	for _, conn := range ts.localConns {
+		conn.Close()
+	}
+	for _, conn := range ts.remoteConns {
+		conn.Close()
+	}
+	ts.localSess.Close()
+	ts.remoteSess.Close()
+
+	<-ts.closeChan
+	<-ts.closeChan
 }

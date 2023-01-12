@@ -1,6 +1,7 @@
 package ncp
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -77,7 +78,7 @@ type Session struct {
 	sendWindowPacketSize  float64 // send window counted by packets, equal to sendWindowsSize / sendMtu
 	recvMsgMu             sync.Mutex
 	recvMsgs              map[uint32]*stRecvMsg
-	waitForSendWindowTime map[uint32]int64 // the duration wait for send window available
+	waitForSendWindowTime map[uint32]time.Duration // the duration wait for send window available
 	nackSeq               uint32
 	numOverSendWindowSize int
 }
@@ -114,7 +115,7 @@ func NewSession(localAddr, remoteAddr net.Addr, localClientIDs, remoteClientIDs 
 
 		sendWindowPacketSize:  float64(config.SessionWindowSize) / float64(config.MTU),
 		recvMsgs:              make(map[uint32]*stRecvMsg),
-		waitForSendWindowTime: make(map[uint32]int64),
+		waitForSendWindowTime: make(map[uint32]time.Duration),
 	}
 
 	session.context, session.cancel = context.WithCancel(context.Background())
@@ -467,7 +468,10 @@ func (session *Session) waitForSendWindow(ctx context.Context, n uint32) (uint32
 	if err := ctx.Err(); err != nil {
 		return 0, err
 	}
-	start := time.Now().UnixMilli()
+
+	// FXB
+	start := time.Now()
+
 	for session.SendWindowUsed()+n > session.sendWindowSize {
 		session.numOverSendWindowSize++
 		select {
@@ -477,8 +481,9 @@ func (session *Session) waitForSendWindow(ctx context.Context, n uint32) (uint32
 			return 0, ctx.Err()
 		}
 	}
+
 	// FXB
-	dur := time.Now().UnixMilli() - start
+	dur := time.Since(start)
 	if dur > 1 {
 		session.waitForSendWindowTime[session.sendWindowEndSeq] = dur
 	}
@@ -492,6 +497,16 @@ func (session *Session) flushSendBuffer() error {
 	if len(session.sendBuffer) == 0 {
 		session.Unlock()
 		return nil
+	}
+
+	// FXB
+	// fmt.Printf("session.sendBuffer len %v\n", len(session.sendBuffer))
+	if len(session.sendBuffer) > 48 {
+		var d TestData
+		(&d).Dec(session.sendBuffer)
+		d.SessSend = time.Now().UnixMilli()
+		b := d.Enc()
+		ReplaceTestData(session.sendBuffer, b)
 	}
 
 	seq := session.sendWindowEndSeq
@@ -872,6 +887,34 @@ func (session *Session) Read(b []byte) (_ int, e error) {
 	}
 
 	return bytesReceived, nil
+}
+
+type TestData struct {
+	TestSend int64
+	SessSend int64
+	ConnSend int64
+	ConnRecv int64
+	SessRecv int64
+	TestRecv int64
+}
+
+func (d TestData) Enc() []byte {
+	var b bytes.Buffer
+	fmt.Fprintln(&b, d.TestSend, d.SessSend, d.ConnSend, d.ConnRecv, d.SessRecv, d.TestRecv)
+	return b.Bytes()
+}
+func ReplaceTestData(b []byte, d []byte) {
+	if len(d) == 0 || len(b) == 0 || len(b) < len(d) {
+		return
+	}
+	for i := 0; i < len(d); i++ {
+		b[i] = d[i]
+	}
+}
+func (d *TestData) Dec(b []byte) error {
+	buf := bytes.NewBuffer(b)
+	_, err := fmt.Fscanln(buf, &d.TestSend, &d.SessSend, &d.ConnSend, &d.ConnRecv, &d.SessRecv, &d.TestRecv)
+	return err
 }
 
 func (session *Session) Write(b []byte) (_ int, e error) {
