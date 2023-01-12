@@ -109,6 +109,25 @@ func TestBaseAndLowAndHighTp(t *testing.T) {
 
 }
 
+// go test -v -run=TestBaseAndHighLatency
+func TestBaseAndHighLatency(t *testing.T) {
+	if testResult == nil {
+		testResult = make([]*stTestCase, 0)
+	}
+
+	tc := &stTestCase{id: id, name: fmt.Sprintf("Append one client throughput %v packets/s, latency %v, loss %v to base case",
+		highLatConf.Throughput, highLatConf.Latency, highLatConf.Loss), numClients: 2, bytesToSend: bytesToSend}
+	tc.mockConfigs = make(map[string]*mockconn.ConnConfig)
+	tc.mockConfigs["0"] = &baseConf
+	tc.mockConfigs["1"] = &highLatConf
+
+	ncp.PreviousVersion = true // test previous version
+	tc = run(tc)
+	ncp.PreviousVersion = false // test new version
+	tc = run(tc)
+	testResult = append(testResult, tc)
+}
+
 func test() {
 
 	// p := flag.Bool("p", false, "Run previous version")
