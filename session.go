@@ -1,13 +1,11 @@
 package ncp
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"log"
 	"net"
-	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -22,12 +20,6 @@ const (
 
 // FXB testing
 var PreviousVersion bool = false
-
-type stRecvMsg struct {
-	seq      uint32
-	waitMs   int64
-	clientId string
-}
 
 type Session struct {
 	config           *Config
@@ -59,28 +51,31 @@ type Session struct {
 	isAccepted bool
 
 	sync.RWMutex
-	isEstablished       bool
-	isClosed            bool
-	sendBuffer          []byte
-	sendWindowStartSeq  uint32
-	sendWindowEndSeq    uint32
-	sendWindowData      map[uint32][]byte
-	recvWindowStartSeq  uint32
-	recvWindowUsed      uint32
-	recvWindowData      map[uint32][]byte
+	isEstablished           bool
+	isClosed                bool
+	sendBuffer              []byte
+	sendWindowStartSeq      uint32
+	sendWindowEndSeq        uint32
+	sendWindowData          map[uint32][]byte
+	recvWindowStartSeq      uint32
+	recvWindowStartSeqStart time.Time
+	recvWindowUsed          uint32
+	recvWindowData          map[uint32][]byte
+
+	bytesReceived uint64 // FXB, bytes received by receiving session
+
 	bytesWrite          uint64
-	bytesRead           uint64
+	bytesRead           uint64 // FXB, bytes read by session.Read, it usually means data is gotten by applicaiton.
 	bytesReadSentTime   time.Time
 	bytesReadUpdateTime time.Time
 	remoteBytesRead     uint64
 
 	// FXB
-	sendWindowPacketSize  float64 // send window counted by packets, equal to sendWindowsSize / sendMtu
-	recvMsgMu             sync.Mutex
-	recvMsgs              map[uint32]*stRecvMsg
-	waitForSendWindowTime map[uint32]time.Duration // the duration wait for send window available
-	nackSeq               uint32
-	numOverSendWindowSize int
+	sendWindowPacketSize float64 // send window counted by packets, equal to sendWindowsSize / sendMtu
+	nackSeq              uint32
+	nSendWindowFull      int
+	nRecvWindowFull      int
+	nResend              int
 }
 
 type SendWithFunc func(localClientID, remoteClientID string, buf []byte, writeTimeout time.Duration) error
@@ -113,9 +108,7 @@ func NewSession(localAddr, remoteAddr net.Addr, localClientIDs, remoteClientIDs 
 		remoteBytesRead:     0,
 		onAccept:            make(chan struct{}, 1),
 
-		sendWindowPacketSize:  float64(config.SessionWindowSize) / float64(config.MTU),
-		recvMsgs:              make(map[uint32]*stRecvMsg),
-		waitForSendWindowTime: make(map[uint32]time.Duration),
+		sendWindowPacketSize: float64(config.SessionWindowSize) / float64(config.MTU),
 	}
 
 	session.context, session.cancel = context.WithCancel(context.Background())
@@ -125,45 +118,6 @@ func NewSession(localAddr, remoteAddr net.Addr, localClientIDs, remoteClientIDs 
 	}
 
 	return session, nil
-}
-
-func (session *Session) PrintStatic() {
-	if session.numOverSendWindowSize > 0 {
-		fmt.Printf("%v has %v connections. session SendWindowSize is full times: %v\n",
-			session.localAddr, len(session.connections), session.numOverSendWindowSize)
-	}
-
-	for _, conn := range session.connections {
-		conn.PrintStatic()
-	}
-
-	msgs := make([]*stRecvMsg, 0)
-	if len(session.recvMsgs) > 0 {
-		for _, m := range session.recvMsgs {
-			if m.waitMs > 0 {
-				msgs = append(msgs, m)
-			}
-		}
-		fmt.Println()
-
-		sort.Slice(msgs, func(i, j int) bool {
-			return msgs[i].waitMs > msgs[j].waitMs
-		})
-		num := len(msgs)
-		if num > 10 {
-			num = 10
-		}
-
-	}
-}
-
-func (session *Session) ResetStatic() {
-	for _, conn := range session.connections {
-		conn.ResetStatic()
-	}
-	session.recvMsgMu.Lock()
-	session.recvMsgs = make(map[uint32]*stRecvMsg)
-	session.recvMsgMu.Unlock()
 }
 
 func (session *Session) IsStream() bool {
@@ -186,7 +140,13 @@ func (session *Session) IsClosed() bool {
 func (session *Session) GetBytesRead() uint64 {
 	session.RLock()
 	defer session.RUnlock()
-	return session.bytesRead
+
+	if PreviousVersion {
+		return session.bytesRead
+	} else {
+		return session.bytesReceived
+	}
+
 }
 
 func (session *Session) updateBytesReadSentTime() {
@@ -287,6 +247,12 @@ func (session *Session) ReceiveWith(localClientID, remoteClientID string, buf []
 			count = len(packet.AckSeqCount)
 		}
 
+		if !PreviousVersion {
+			if packet.NackSeq > 0 {
+				session.resendChan <- packet.NackSeq
+			}
+		}
+
 		var ackStartSeq, ackEndSeq uint32
 		for i := 0; i < count; i++ {
 			if len(packet.AckStartSeq) > 0 {
@@ -348,24 +314,24 @@ func (session *Session) ReceiveWith(localClientID, remoteClientID string, buf []
 
 		if CompareSeq(packet.SequenceId, session.recvWindowStartSeq) >= 0 {
 			if _, ok := session.recvWindowData[packet.SequenceId]; !ok {
-				if session.recvWindowUsed+uint32(len(packet.Data)) > session.recvWindowSize {
-					fmt.Printf("recvWindowUsed + len(packet.Data) :%v > session.recvWindowSize : %v\n",
-						session.recvWindowUsed+uint32(len(packet.Data)), session.recvWindowSize)
-					return ErrRecvWindowFull
+				if packet.SequenceId != session.recvWindowStartSeq {
+					if PreviousVersion {
+						if session.recvWindowUsed+uint32(len(packet.Data)) > session.recvWindowSize {
+							session.nRecvWindowFull++
+							return ErrRecvWindowFull
+						}
+					} else {
+						if session.recvWindowUsed+uint32(len(packet.Data)) > session.recvWindowSize*2 {
+							session.nRecvWindowFull++
+							return ErrRecvWindowFull
+						}
+					}
 				}
 
 				session.recvWindowData[packet.SequenceId] = packet.Data
 				session.recvWindowUsed += uint32(len(packet.Data))
-
-				session.recvMsgMu.Lock()
-				recvMsg, ok := session.recvMsgs[packet.SequenceId]
-				if ok {
-					recvMsg.clientId = localClientID
-				} else {
-					recvMsg = &stRecvMsg{seq: packet.SequenceId, clientId: localClientID}
-				}
-				session.recvMsgs[packet.SequenceId] = recvMsg
-				session.recvMsgMu.Unlock()
+				// FXB
+				session.bytesReceived += uint64(len(packet.Data))
 
 				if packet.SequenceId == session.recvWindowStartSeq {
 					select {
@@ -431,7 +397,12 @@ func (session *Session) startCheckBytesRead() error {
 		session.RLock()
 		sentTime := session.bytesReadSentTime
 		updateTime := session.bytesReadUpdateTime
-		bytesRead := session.bytesRead
+
+		bytesRead := session.bytesReceived // FXB
+		if PreviousVersion {
+			bytesRead = session.bytesRead
+		}
+
 		session.RUnlock()
 
 		if bytesRead == 0 || sentTime.After(updateTime) || time.Since(updateTime) < time.Duration(session.config.SendBytesReadThreshold)*time.Millisecond {
@@ -469,23 +440,14 @@ func (session *Session) waitForSendWindow(ctx context.Context, n uint32) (uint32
 		return 0, err
 	}
 
-	// FXB
-	start := time.Now()
-
 	for session.SendWindowUsed()+n > session.sendWindowSize {
-		session.numOverSendWindowSize++
+		session.nSendWindowFull++
 		select {
 		case <-session.sendWindowUpdate:
 		case <-time.After(maxWait):
 		case <-ctx.Done():
 			return 0, ctx.Err()
 		}
-	}
-
-	// FXB
-	dur := time.Since(start)
-	if dur > 1 {
-		session.waitForSendWindowTime[session.sendWindowEndSeq] = dur
 	}
 
 	return session.sendWindowSize - session.SendWindowUsed(), nil
@@ -497,16 +459,6 @@ func (session *Session) flushSendBuffer() error {
 	if len(session.sendBuffer) == 0 {
 		session.Unlock()
 		return nil
-	}
-
-	// FXB
-	// fmt.Printf("session.sendBuffer len %v\n", len(session.sendBuffer))
-	if len(session.sendBuffer) > 48 {
-		var d TestData
-		(&d).Dec(session.sendBuffer)
-		d.SessSend = time.Now().UnixMilli()
-		b := d.Enc()
-		ReplaceTestData(session.sendBuffer, b)
 	}
 
 	seq := session.sendWindowEndSeq
@@ -812,7 +764,6 @@ func (session *Session) Read(b []byte) (_ int, e error) {
 	session.readLock.Lock()
 	defer session.readLock.Unlock()
 
-	start := time.Now().UnixMilli()
 	for {
 		if err := session.readContext.Err(); err != nil {
 			return 0, err
@@ -833,20 +784,6 @@ func (session *Session) Read(b []byte) (_ int, e error) {
 		}
 	}
 
-	end := time.Now().UnixMilli()
-
-	session.recvMsgMu.Lock()
-
-	recvMsg, ok := session.recvMsgs[session.recvWindowStartSeq]
-	if ok {
-		recvMsg.waitMs = end - start
-	} else {
-		recvMsg = &stRecvMsg{seq: session.recvWindowStartSeq, waitMs: end - start}
-	}
-	session.recvMsgs[recvMsg.seq] = recvMsg
-
-	session.recvMsgMu.Unlock()
-
 	session.Lock()
 	defer session.Unlock()
 
@@ -859,6 +796,7 @@ func (session *Session) Read(b []byte) (_ int, e error) {
 	if bytesReceived == len(data) {
 		delete(session.recvWindowData, session.recvWindowStartSeq)
 		session.recvWindowStartSeq = NextSeq(session.recvWindowStartSeq, 1)
+		session.recvWindowStartSeqStart = time.Now()
 	} else {
 		session.recvWindowData[session.recvWindowStartSeq] = data[bytesReceived:]
 	}
@@ -887,34 +825,6 @@ func (session *Session) Read(b []byte) (_ int, e error) {
 	}
 
 	return bytesReceived, nil
-}
-
-type TestData struct {
-	TestSend int64
-	SessSend int64
-	ConnSend int64
-	ConnRecv int64
-	SessRecv int64
-	TestRecv int64
-}
-
-func (d TestData) Enc() []byte {
-	var b bytes.Buffer
-	fmt.Fprintln(&b, d.TestSend, d.SessSend, d.ConnSend, d.ConnRecv, d.SessRecv, d.TestRecv)
-	return b.Bytes()
-}
-func ReplaceTestData(b []byte, d []byte) {
-	if len(d) == 0 || len(b) == 0 || len(b) < len(d) {
-		return
-	}
-	for i := 0; i < len(d); i++ {
-		b[i] = d[i]
-	}
-}
-func (d *TestData) Dec(b []byte) error {
-	buf := bytes.NewBuffer(b)
-	_, err := fmt.Fscanln(buf, &d.TestSend, &d.SessSend, &d.ConnSend, &d.ConnRecv, &d.SessRecv, &d.TestRecv)
-	return err
 }
 
 func (session *Session) Write(b []byte) (_ int, e error) {
@@ -1105,8 +1015,35 @@ func (session *Session) UpdateConnWindowSize() {
 	for _, conn := range session.connections {
 		totalEtp += conn.etp
 	}
+	max := uint32(0)
+	var fastConn *Connection
 	for _, conn := range session.connections {
 		size := uint32(session.sendWindowPacketSize * conn.etp / totalEtp)
+		if size > max {
+			max = size
+			fastConn = conn
+		}
 		conn.setWindowSize(size)
+	}
+	if fastConn != nil {
+		fastConn.isFastest = true
+	}
+}
+
+func (session *Session) PrintStatic() {
+	if session.nSendWindowFull > 0 || session.nRecvWindowFull > 0 || session.nResend > 0 {
+		fmt.Printf("\n%v has %v connections. session nSendWindowFull: %v, nRecvWindowFull: %v, nResend: %v\n",
+			session.localAddr, len(session.connections), session.nSendWindowFull, session.nRecvWindowFull, session.nResend)
+	}
+
+	for _, conn := range session.connections {
+		conn.PrintStatic()
+	}
+
+}
+
+func (session *Session) ResetStatic() {
+	for _, conn := range session.connections {
+		conn.ResetStatic()
 	}
 }

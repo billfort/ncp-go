@@ -10,10 +10,9 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/nknorg/ncp-go/pb"
-
 	"github.com/golang/protobuf/proto"
 	ncp "github.com/nknorg/ncp-go"
+	"github.com/nknorg/ncp-go/pb"
 	"github.com/nknorg/ncp-go/test/mockconn"
 )
 
@@ -92,14 +91,12 @@ func (ts *TestSession) networkRead(s *ncp.Session, conn net.Conn, clientId strin
 	count := 0
 	var zeroTime time.Time
 	var t1 time.Time
-	// var dur time.Duration
 
 loop:
 	for {
 		b := make([]byte, 1500)
 		n, err := conn.Read(b)
 		if err != nil {
-			// fmt.Printf("%v testsession.networkRead conn.Read error: %v\n", conn.LocalAddr().String(), err)
 			break
 		}
 		if t1 == zeroTime {
@@ -107,17 +104,14 @@ loop:
 		}
 
 		if n > 52 {
-			var d ncp.TestData
+			var d TestData
 			pack := pb.Packet{}
 			proto.Unmarshal(b, &pack)
 			(&d).Dec(pack.Data)
 			d.ConnRecv = time.Now().UnixMilli()
 			bb := d.Enc()
-			ncp.ReplaceTestData(pack.Data, bb)
+			ReplaceTestData(pack.Data, bb)
 			b, _ = proto.Marshal(&pack)
-
-			// fmt.Printf("ts.send:%v, sess.send:%v, conn.tx:%v, networkRead:%v\n",
-			// 	d.TestSend, d.SessSend, d.ConnSend, d.ConnRecv)
 		}
 
 		err = s.ReceiveWith(clientId, clientId, b[:n])
@@ -125,7 +119,6 @@ loop:
 			fmt.Printf("%v testsession.networkRead s.ReceiveWith error: %v\n", conn.LocalAddr().String(), err)
 		}
 		count++
-		// dur = time.Since(t1)
 
 		select {
 		case <-ts.closeChan:
@@ -134,7 +127,6 @@ loop:
 		}
 	}
 
-	// fmt.Printf("%v testsession.networkRead, throughput is %.1f \n", conn.LocalAddr().String(), float64(count)/dur.Seconds())
 	ts.closeChan <- struct{}{}
 }
 
@@ -169,7 +161,7 @@ func (ts *TestSession) write(s *ncp.Session, numBytes int, writeChan chan int64)
 		return err
 	}
 
-	d := ncp.TestData{}
+	d := TestData{}
 
 	var bytesSent, count int64
 	for i := 0; i < numBytes/1024; i++ {
@@ -177,7 +169,7 @@ func (ts *TestSession) write(s *ncp.Session, numBytes int, writeChan chan int64)
 
 		d.TestSend = time.Now().UnixMilli()
 		db := d.Enc()
-		ncp.ReplaceTestData(b, db)
+		ReplaceTestData(b, db)
 
 		n, err := s.Write(b)
 		if err != nil {
