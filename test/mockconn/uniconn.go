@@ -5,7 +5,6 @@ import (
 	"errors"
 	"log"
 	"math/rand"
-	"sort"
 	"time"
 
 	"golang.org/x/time/rate"
@@ -59,13 +58,14 @@ type UniConn struct {
 	closeReadCtxCancel  context.CancelFunc
 }
 
+func init() {
+	rand.Seed(time.Now().UnixNano())
+}
+
 func NewUniConn(conf *ConnConfig) (*UniConn, error) {
 
-	if conf.Throughput > 0 && conf.BufferSize == 0 {
+	if conf.BufferSize == 0 {
 		conf.BufferSize = uint(2 * float64(conf.Throughput) * conf.Latency.Seconds())
-	}
-	if conf.BufferSize < conf.Throughput {
-		conf.BufferSize = conf.Throughput
 	}
 
 	uc := &UniConn{throughput: conf.Throughput, bufferSize: conf.BufferSize, latency: conf.Latency, loss: conf.Loss,
@@ -79,13 +79,9 @@ func NewUniConn(conf *ConnConfig) (*UniConn, error) {
 
 	uc.closeWriteCtx, uc.closeWriteCtxCancel = context.WithCancel(context.Background())
 	uc.closeReadCtx, uc.closeReadCtxCancel = context.WithCancel(context.Background())
+	uc.SetDeadline(zeroTime)
 
-	if uc.throughput <= 512 {
-		go uc.throughputReadByTicker()
-	} else {
-		go uc.throughputReadByTimeWindow()
-	}
-	// go uc.throughputReadByLimiter()
+	go uc.throughputRead()
 
 	go uc.latencyRead()
 
@@ -101,18 +97,14 @@ func (uc *UniConn) Write(b []byte) (n int, err error) {
 	dt := &dataWithTime{data: b}
 
 	select {
-	case <-uc.closeWriteCtx.Done():
-		return 0, uc.closeWriteCtx.Err()
+	case <-uc.writeCtx.Done():
+		return 0, uc.writeCtx.Err()
 	default:
 	}
 
 	select {
 	case <-uc.writeCtx.Done(): // for one time deadline or for one time cancel
 		return 0, uc.writeCtx.Err()
-
-	case <-uc.closeWriteCtx.Done(): // for close unicon writing
-		close(uc.sendCh)
-		return 0, uc.closeWriteCtx.Err()
 
 	case uc.sendCh <- dt:
 		uc.nSendPacket++
@@ -123,7 +115,6 @@ func (uc *UniConn) Write(b []byte) (n int, err error) {
 
 func (uc *UniConn) randomLoss() bool {
 	if uc.loss > 0 {
-		rand.Seed(time.Now().UnixNano())
 		l := rand.Float32()
 		if l < uc.loss {
 			uc.nLoss++
@@ -135,18 +126,19 @@ func (uc *UniConn) randomLoss() bool {
 }
 
 // The routine to stimulate throughput by rate Limiter
-func (uc *UniConn) throughputReadByLimiter() error {
+func (uc *UniConn) throughputRead() error {
+
+	defer close(uc.bufferCh)
 
 	r := rate.NewLimiter(rate.Limit(uc.throughput), 1)
 	for {
-		err := r.Wait(uc.readCtx)
+		err := r.Wait(uc.closeWriteCtx)
 		if err != nil {
 			return err
 		}
 
 		select {
 		case <-uc.closeWriteCtx.Done():
-			close(uc.bufferCh)
 			return uc.closeWriteCtx.Err()
 
 		case dt := <-uc.sendCh:
@@ -162,93 +154,12 @@ func (uc *UniConn) throughputReadByLimiter() error {
 	return nil
 }
 
-// The routine to stimulate throughput by ticker
-func (uc *UniConn) throughputReadByTicker() error {
-
-	ticker := time.NewTicker(time.Second / time.Duration(uc.throughput))
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-uc.closeWriteCtx.Done():
-			return uc.closeWriteCtx.Err()
-
-		case <-ticker.C:
-			select {
-			case <-uc.closeWriteCtx.Done():
-				close(uc.bufferCh)
-				return uc.closeWriteCtx.Err()
-
-			case dt := <-uc.sendCh:
-				if dt != nil {
-					if !uc.randomLoss() {
-						dt.t = time.Now()
-						uc.bufferCh <- dt
-					}
-				}
-			}
-		}
-	}
-
-	return nil
-}
-
-// The routine to stimulate throughput by moving time window
-func (uc *UniConn) throughputReadByTimeWindow() error {
-
-	s := make([]time.Time, 0, uc.throughput)
-
-	seg := uc.throughput / 100 // segment throughtput form time window
-	if seg > 20 {
-		seg = 20
-	}
-
-	for {
-
-		n := len(s)
-		if uint(n) < uc.throughput/seg {
-			select {
-			case <-uc.closeWriteCtx.Done():
-				close(uc.bufferCh)
-				return uc.closeWriteCtx.Err()
-
-			case dt := <-uc.sendCh:
-				if dt != nil {
-					if !uc.randomLoss() {
-						now := time.Now()
-						dt.t = now
-						uc.bufferCh <- dt
-						s = append(s, now)
-					}
-				}
-			}
-		} else {
-			t := time.Now().Add(-(time.Duration(1000 / seg)) * time.Millisecond)
-			i := sort.Search(n, func(i int) bool {
-				return s[i].After(t)
-			})
-			if i >= n {
-				s = make([]time.Time, 0, uc.throughput)
-			} else if i > 0 && i < n {
-				s = s[i:]
-			}
-
-			if uint(len(s)) >= uc.throughput/seg {
-				time.Sleep(time.Millisecond)
-			}
-		}
-	}
-
-	return nil
-}
-
 // The routine to stimulate latency
 func (uc *UniConn) latencyRead() error {
-
+	defer close(uc.recvCh)
 	for {
 		select {
 		case <-uc.closeReadCtx.Done():
-			close(uc.recvCh)
 			return uc.closeReadCtx.Err()
 
 		case dt := <-uc.bufferCh:
@@ -258,7 +169,6 @@ func (uc *UniConn) latencyRead() error {
 					timer := time.NewTimer(uc.latency - dur)
 					select {
 					case <-uc.closeReadCtx.Done():
-						close(uc.recvCh)
 						return uc.closeReadCtx.Err()
 
 					case <-timer.C:
@@ -266,12 +176,14 @@ func (uc *UniConn) latencyRead() error {
 				}
 				uc.recvCh <- dt
 			}
-
 		}
 	}
 }
 
 func (uc *UniConn) Read(b []byte) (n int, err error) {
+	if err := uc.readCtx.Err(); err != nil {
+		return 0, err
+	}
 	// check if there is buffered unread data
 	unreadLen := len(uc.unreadData)
 	if unreadLen > 0 {
@@ -294,8 +206,6 @@ func (uc *UniConn) Read(b []byte) (n int, err error) {
 		select {
 		case <-uc.readCtx.Done():
 			return 0, uc.readCtx.Err()
-		case <-uc.closeReadCtx.Done():
-			return 0, uc.closeReadCtx.Err()
 
 		case dt := <-uc.recvCh:
 			if dt != nil {
@@ -310,12 +220,8 @@ func (uc *UniConn) Read(b []byte) (n int, err error) {
 				copy(b, dt.data)
 				uc.nRecvPacket++
 
-				if uc.averageLatency == 0 {
-					uc.averageLatency = time.Since(dt.t)
-				} else {
-					uc.averageLatency = time.Duration(float64(uc.averageLatency)*(float64(uc.nRecvPacket-1)/float64(uc.nRecvPacket)) +
-						float64(time.Since(dt.t))/float64(uc.nRecvPacket))
-				}
+				uc.averageLatency = time.Duration(float64(uc.averageLatency)*(float64(uc.nRecvPacket-1)/float64(uc.nRecvPacket)) +
+					float64(time.Since(dt.t))/float64(uc.nRecvPacket))
 
 				return n, nil
 
@@ -323,13 +229,12 @@ func (uc *UniConn) Read(b []byte) (n int, err error) {
 
 		}
 	}
-
-	return 0, ErrUnknown
 }
 
 func (uc *UniConn) CloseWrite() error {
 
 	uc.closeWriteCtxCancel()
+	close(uc.sendCh)
 
 	return nil
 }
@@ -362,18 +267,18 @@ func (uc *UniConn) SetDeadline(t time.Time) error {
 
 func (uc *UniConn) SetReadDeadline(t time.Time) error {
 	if t == zeroTime {
-		uc.readCtx, uc.readCancel = context.WithCancel(context.Background())
+		uc.readCtx, uc.readCancel = context.WithCancel(uc.closeReadCtx)
 	} else {
-		uc.readCtx, uc.readCancel = context.WithDeadline(context.Background(), t)
+		uc.readCtx, uc.readCancel = context.WithDeadline(uc.closeReadCtx, t)
 	}
 	return nil
 }
 
 func (uc *UniConn) SetWriteDeadline(t time.Time) error {
 	if t == zeroTime {
-		uc.writeCtx, uc.writeCancel = context.WithCancel(context.Background())
+		uc.writeCtx, uc.writeCancel = context.WithCancel(uc.closeWriteCtx)
 	} else {
-		uc.writeCtx, uc.writeCancel = context.WithDeadline(context.Background(), t)
+		uc.writeCtx, uc.writeCancel = context.WithDeadline(uc.closeWriteCtx, t)
 	}
 	return nil
 }
