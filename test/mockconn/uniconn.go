@@ -72,17 +72,11 @@ func NewUniConn(conf *ConnConfig) (*UniConn, error) {
 		sendCh: make(chan *dataWithTime, 0), bufferCh: make(chan *dataWithTime, conf.BufferSize),
 		recvCh: make(chan *dataWithTime, 0), localAddr: conf.Addr1, remoteAddr: conf.Addr2}
 
-	err := uc.SetDeadline(zeroTime)
-	if err != nil {
-		return nil, err
-	}
-
 	uc.closeWriteCtx, uc.closeWriteCtxCancel = context.WithCancel(context.Background())
 	uc.closeReadCtx, uc.closeReadCtxCancel = context.WithCancel(context.Background())
 	uc.SetDeadline(zeroTime)
 
 	go uc.throughputRead()
-
 	go uc.latencyRead()
 
 	return uc, nil
@@ -90,18 +84,15 @@ func NewUniConn(conf *ConnConfig) (*UniConn, error) {
 
 func (uc *UniConn) Write(b []byte) (n int, err error) {
 
+	if err = uc.writeCtx.Err(); err != nil {
+		return 0, err
+	}
+
 	if len(b) == 0 {
 		return 0, ErrZeroLengh
 	}
 
 	dt := &dataWithTime{data: b}
-
-	select {
-	case <-uc.writeCtx.Done():
-		return 0, uc.writeCtx.Err()
-	default:
-	}
-
 	select {
 	case <-uc.writeCtx.Done(): // for one time deadline or for one time cancel
 		return 0, uc.writeCtx.Err()
@@ -181,10 +172,12 @@ func (uc *UniConn) latencyRead() error {
 }
 
 func (uc *UniConn) Read(b []byte) (n int, err error) {
-	if err := uc.readCtx.Err(); err != nil {
+
+	if err = uc.readCtx.Err(); err != nil {
 		return 0, err
 	}
-	// check if there is buffered unread data
+
+	// check buffered unread data
 	unreadLen := len(uc.unreadData)
 	if unreadLen > 0 {
 		if unreadLen <= len(b) {

@@ -26,8 +26,9 @@ func NewMockConn(conf *ConnConfig) (net.Conn, net.Conn, error) {
 		return nil, nil, err
 	}
 
-	conf.Addr1, conf.Addr2 = conf.Addr2, conf.Addr1 // switch address
-	r2l, err := NewUniConn(conf)
+	conf2 := conf
+	conf2.Addr1, conf2.Addr2 = conf.Addr2, conf.Addr1 // switch address
+	r2l, err := NewUniConn(conf2)
 	if err != nil {
 		return nil, nil, err
 	}
