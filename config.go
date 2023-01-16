@@ -22,10 +22,10 @@ type Config struct {
 
 var DefaultConfig = Config{
 	NonStream:                    false,
-	SessionWindowSize:            256 << 10,
+	SessionWindowSize:            256 << 10, // FXB, 4 << 20
 	MTU:                          1024,
 	InitialConnectionWindowSize:  16,
-	MaxConnectionWindowSize:      128,
+	MaxConnectionWindowSize:      128, // FXB, 256
 	MinConnectionWindowSize:      1,
 	MaxAckSeqListSize:            32,
 	FlushInterval:                10,

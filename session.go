@@ -18,8 +18,8 @@ const (
 	MinSequenceID = 1
 )
 
-// FXB testing
-var PreviousVersion bool = false
+// FXB, to compare previous version and new version performance. Related code will be removed when submitting PR
+var NewVersion bool = true
 
 type Session struct {
 	config           *Config
@@ -51,18 +51,15 @@ type Session struct {
 	isAccepted bool
 
 	sync.RWMutex
-	isEstablished           bool
-	isClosed                bool
-	sendBuffer              []byte
-	sendWindowStartSeq      uint32
-	sendWindowEndSeq        uint32
-	sendWindowData          map[uint32][]byte
-	recvWindowStartSeq      uint32
-	recvWindowStartSeqStart time.Time
-	recvWindowUsed          uint32
-	recvWindowData          map[uint32][]byte
-
-	bytesReceived uint64 // FXB, bytes received by receiving session
+	isEstablished      bool
+	isClosed           bool
+	sendBuffer         []byte
+	sendWindowStartSeq uint32
+	sendWindowEndSeq   uint32
+	sendWindowData     map[uint32][]byte
+	recvWindowStartSeq uint32
+	recvWindowUsed     uint32
+	recvWindowData     map[uint32][]byte
 
 	bytesWrite          uint64
 	bytesRead           uint64 // FXB, bytes read by session.Read, it usually means data is gotten by applicaiton.
@@ -71,11 +68,14 @@ type Session struct {
 	remoteBytesRead     uint64
 
 	// FXB
-	sendWindowPacketSize float64 // send window counted by packets, equal to sendWindowsSize / sendMtu
-	nackSeq              uint32
-	nSendWindowFull      int
-	nRecvWindowFull      int
-	nResend              int
+	recvWindowStartSeqStart time.Time
+	bytesReceived           uint64  // bytes received by receiving session
+	sendWindowPacketSize    float64 // send window counted by packets, equal to sendWindowsSize / sendMtu
+	nackSeq                 uint32
+	// FXB, these members are for metrics, will be removed when submitting PR
+	nSendWindowFull int
+	nRecvWindowFull int
+	nResend         int
 }
 
 type SendWithFunc func(localClientID, remoteClientID string, buf []byte, writeTimeout time.Duration) error
@@ -141,7 +141,7 @@ func (session *Session) GetBytesRead() uint64 {
 	session.RLock()
 	defer session.RUnlock()
 
-	if PreviousVersion {
+	if !NewVersion {
 		return session.bytesRead
 	} else {
 		return session.bytesReceived
@@ -232,11 +232,16 @@ func (session *Session) ReceiveWith(localClientID, remoteClientID string, buf []
 	session.Lock()
 	defer session.Unlock()
 
-	if isEstablished && (len(packet.AckStartSeq) > 0 || len(packet.AckSeqCount) > 0) {
+	if !isEstablished {
+		return nil
+	}
+
+	if len(packet.AckStartSeq) > 0 || len(packet.AckSeqCount) > 0 {
 		if len(packet.AckStartSeq) > 0 && len(packet.AckSeqCount) > 0 && len(packet.AckStartSeq) != len(packet.AckSeqCount) {
 			return ErrInvalidPacket
 		}
 
+		// FXB
 		conn := session.connections[connKey(localClientID, remoteClientID)]
 		conn.resetTp()
 
@@ -247,10 +252,9 @@ func (session *Session) ReceiveWith(localClientID, remoteClientID string, buf []
 			count = len(packet.AckSeqCount)
 		}
 
-		if !PreviousVersion {
-			if packet.NackSeq > 0 {
-				session.resendChan <- packet.NackSeq
-			}
+		// FXB, resend the Nack sequence id data
+		if NewVersion && packet.NackSeq > 0 {
+			session.resendChan <- packet.NackSeq
 		}
 
 		var ackStartSeq, ackEndSeq uint32
@@ -291,15 +295,14 @@ func (session *Session) ReceiveWith(localClientID, remoteClientID string, buf []
 			}
 		}
 
-		// New version
+		// FXB
 		conn.updateEtp()
-		if !PreviousVersion {
+		if NewVersion {
 			session.UpdateConnWindowSize()
 		}
-		conn.resetSendTp()
 	}
 
-	if isEstablished && packet.BytesRead > session.remoteBytesRead {
+	if packet.BytesRead > session.remoteBytesRead {
 		session.remoteBytesRead = packet.BytesRead
 		select {
 		case session.sendWindowUpdate <- struct{}{}:
@@ -307,20 +310,23 @@ func (session *Session) ReceiveWith(localClientID, remoteClientID string, buf []
 		}
 	}
 
-	if isEstablished && packet.SequenceId > 0 {
+	if packet.SequenceId > 0 {
 		if uint32(len(packet.Data)) > session.recvMtu {
 			return ErrDataSizeTooLarge
 		}
 
 		if CompareSeq(packet.SequenceId, session.recvWindowStartSeq) >= 0 {
 			if _, ok := session.recvWindowData[packet.SequenceId]; !ok {
+				// FXB, if it is recvWindowStartSeq, we receive it no matter recv window size.
 				if packet.SequenceId != session.recvWindowStartSeq {
-					if PreviousVersion {
+					if !NewVersion {
 						if session.recvWindowUsed+uint32(len(packet.Data)) > session.recvWindowSize {
 							session.nRecvWindowFull++
 							return ErrRecvWindowFull
 						}
 					} else {
+						// Because receiver may wait for seme sequence data, have to buffer more data
+						// suggest it as double of send buffer.
 						if session.recvWindowUsed+uint32(len(packet.Data)) > session.recvWindowSize*2 {
 							session.nRecvWindowFull++
 							return ErrRecvWindowFull
@@ -330,7 +336,8 @@ func (session *Session) ReceiveWith(localClientID, remoteClientID string, buf []
 
 				session.recvWindowData[packet.SequenceId] = packet.Data
 				session.recvWindowUsed += uint32(len(packet.Data))
-				// FXB
+
+				// FXB, here sum data received by receiving session.
 				session.bytesReceived += uint64(len(packet.Data))
 
 				if packet.SequenceId == session.recvWindowStartSeq {
@@ -398,9 +405,9 @@ func (session *Session) startCheckBytesRead() error {
 		sentTime := session.bytesReadSentTime
 		updateTime := session.bytesReadUpdateTime
 
-		bytesRead := session.bytesReceived // FXB
-		if PreviousVersion {
-			bytesRead = session.bytesRead
+		bytesRead := session.bytesReceived // FXB, return back byte received by session
+		if !NewVersion {
+			bytesRead = session.bytesRead // return back byte read by application
 		}
 
 		session.RUnlock()
@@ -814,6 +821,7 @@ func (session *Session) Read(b []byte) (_ int, e error) {
 			if n == len(data) {
 				delete(session.recvWindowData, session.recvWindowStartSeq)
 				session.recvWindowStartSeq = NextSeq(session.recvWindowStartSeq, 1)
+				session.recvWindowStartSeqStart = time.Now()
 			} else {
 				session.recvWindowData[session.recvWindowStartSeq] = data[n:]
 			}
@@ -1015,10 +1023,15 @@ func (session *Session) UpdateConnWindowSize() {
 	for _, conn := range session.connections {
 		totalEtp += conn.etp
 	}
+	if totalEtp <= 0 {
+		return
+	}
+
 	max := uint32(0)
 	var fastConn *Connection
+
 	for _, conn := range session.connections {
-		size := uint32(session.sendWindowPacketSize * conn.etp / totalEtp)
+		size := uint32(session.sendWindowPacketSize * (conn.etp / totalEtp))
 		if size > max {
 			max = size
 			fastConn = conn

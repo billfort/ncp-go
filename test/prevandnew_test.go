@@ -63,9 +63,9 @@ func TestBaseClient(t *testing.T) {
 	tc.mockConfigs = make(map[string]*mockconn.ConnConfig)
 	tc.mockConfigs["0"] = &baseConf
 
-	ncp.PreviousVersion = true // test previous version
+	ncp.NewVersion = false // test previous version
 	tc = run(tc)
-	ncp.PreviousVersion = false // test new version
+	ncp.NewVersion = true // test new version
 	tc = run(tc)
 
 	testResult = append(testResult, tc)
@@ -79,22 +79,22 @@ func TestBaseAndLowTpHighLat(t *testing.T) {
 	}
 
 	id++
-	tc := &TestCase{id: id, name: fmt.Sprintf("Append one client throughput %v packets/s, latency %v, loss %v to base case",
+	tc := &TestCase{id: id, name: fmt.Sprintf("Append 1 client throughput %v packets/s, latency %v, loss %v to base case",
 		lowTpHighLatConf.Throughput, lowTpHighLatConf.Latency, lowTpHighLatConf.Loss), numClients: 2, bytesToSend: bytesToSend}
 	tc.mockConfigs = make(map[string]*mockconn.ConnConfig)
 	tc.mockConfigs["0"] = &baseConf
 	tc.mockConfigs["1"] = &lowTpHighLatConf
 
-	ncp.PreviousVersion = true // test previous version
+	ncp.NewVersion = false // test previous version
 	tc = run(tc)
-	ncp.PreviousVersion = false // test new version
+	ncp.NewVersion = true // test new version
 	tc = run(tc)
 	testResult = append(testResult, tc)
 
 	PrintResult(testResult)
 }
 
-// go test -v -run=TestBaseAndLowTpHighLat
+// go test -v -run=TestBaseAnd2LowTpHighLat
 func TestBaseAnd2LowTpHighLat(t *testing.T) {
 	if testResult == nil {
 		testResult = make([]*TestCase, 0)
@@ -108,9 +108,58 @@ func TestBaseAnd2LowTpHighLat(t *testing.T) {
 	tc.mockConfigs["1"] = &lowTpHighLatConf
 	tc.mockConfigs["2"] = &highLatConf
 
-	ncp.PreviousVersion = true // test previous version
+	ncp.NewVersion = false // test previous version
 	tc = run(tc)
-	ncp.PreviousVersion = false // test new version
+	ncp.NewVersion = true // test new version
+	tc = run(tc)
+	testResult = append(testResult, tc)
+
+	PrintResult(testResult)
+}
+
+// go test -v -run=TestBaseAnd3LowTpHighLat
+func TestBaseAnd3LowTpHighLat(t *testing.T) {
+	if testResult == nil {
+		testResult = make([]*TestCase, 0)
+	}
+
+	id++
+	tc := &TestCase{id: id, name: fmt.Sprintf("Append 3 clients throughput %v packets/s, latency %v, loss %v to base case",
+		lowTpHighLatConf.Throughput, lowTpHighLatConf.Latency, lowTpHighLatConf.Loss), numClients: 4, bytesToSend: bytesToSend}
+	tc.mockConfigs = make(map[string]*mockconn.ConnConfig)
+	tc.mockConfigs["0"] = &baseConf
+	tc.mockConfigs["1"] = &lowTpHighLatConf
+	tc.mockConfigs["2"] = &highLatConf
+	tc.mockConfigs["3"] = &lowTpHighLatConf
+
+	ncp.NewVersion = false // test previous version
+	tc = run(tc)
+	ncp.NewVersion = true // test new version
+	tc = run(tc)
+	testResult = append(testResult, tc)
+
+	PrintResult(testResult)
+}
+
+// go test -v -run=TestBaseAnd3LowTpHighLat
+func TestBaseAnd4LowTpHighLat(t *testing.T) {
+	if testResult == nil {
+		testResult = make([]*TestCase, 0)
+	}
+
+	id++
+	tc := &TestCase{id: id, name: fmt.Sprintf("Append 4 clients throughput %v packets/s, latency %v, loss %v to base case",
+		lowTpHighLatConf.Throughput, lowTpHighLatConf.Latency, lowTpHighLatConf.Loss), numClients: 5, bytesToSend: bytesToSend}
+	tc.mockConfigs = make(map[string]*mockconn.ConnConfig)
+	tc.mockConfigs["0"] = &baseConf
+	tc.mockConfigs["1"] = &lowTpHighLatConf
+	tc.mockConfigs["2"] = &highLatConf
+	tc.mockConfigs["3"] = &lowTpHighLatConf
+	tc.mockConfigs["4"] = &highLatConf
+
+	ncp.NewVersion = false // test previous version
+	tc = run(tc)
+	ncp.NewVersion = true // test new version
 	tc = run(tc)
 	testResult = append(testResult, tc)
 
@@ -119,7 +168,7 @@ func TestBaseAnd2LowTpHighLat(t *testing.T) {
 
 func run(tc *TestCase) *TestCase {
 	version := "new version"
-	if ncp.PreviousVersion {
+	if !ncp.NewVersion {
 		version = "prev version"
 	}
 	fmt.Printf("\n>>>>>> Case %v, %v, %v\n", id, version, tc.name)
@@ -149,12 +198,12 @@ func run(tc *TestCase) *TestCase {
 
 	testSess.remoteSess.PrintStatic()
 
-	if ncp.PreviousVersion {
-		tc.oldVersionDuration = duration
-		tc.oldVersionSpeed = speed
-	} else {
+	if ncp.NewVersion {
 		tc.newVersionDuration = duration
 		tc.newVersionSpeed = speed
+	} else {
+		tc.oldVersionDuration = duration
+		tc.oldVersionSpeed = speed
 	}
 
 	<-writeChan // bytesSent
