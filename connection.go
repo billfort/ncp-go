@@ -293,8 +293,8 @@ func (conn *Connection) sendAck() error {
 				if conn.session.recvWindowStartSeq > conn.session.nackSeq &&
 					time.Since(conn.session.recvWindowStartSeqStart) >
 						time.Duration(4*conn.session.config.SendAckInterval)*time.Millisecond {
-					pack.NackSeq = conn.session.recvWindowStartSeq
-					conn.session.nackSeq = conn.session.recvWindowStartSeq
+					// pack.NackSeq = conn.session.recvWindowStartSeq
+					// conn.session.nackSeq = conn.session.recvWindowStartSeq
 				}
 			}
 		}
