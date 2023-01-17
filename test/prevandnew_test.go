@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	ncp "github.com/nknorg/ncp-go"
+	// ncp "github.com/nknorg/ncp-go"
 	"github.com/nknorg/ncp-go/test/mockconn"
 )
 
@@ -63,9 +63,9 @@ func TestBaseClient(t *testing.T) {
 	tc.mockConfigs = make(map[string]*mockconn.ConnConfig)
 	tc.mockConfigs["0"] = &baseConf
 
-	ncp.NewVersion = false // test previous version
-	tc = run(tc)
-	ncp.NewVersion = true // test new version
+	// ncp.NewVersion = false // test previous version
+	// tc = run(tc)
+	// ncp.NewVersion = true // test new version
 	tc = run(tc)
 
 	testResult = append(testResult, tc)
@@ -85,9 +85,9 @@ func TestBaseAndLowTpHighLat(t *testing.T) {
 	tc.mockConfigs["0"] = &baseConf
 	tc.mockConfigs["1"] = &lowTpHighLatConf
 
-	ncp.NewVersion = false // test previous version
-	tc = run(tc)
-	ncp.NewVersion = true // test new version
+	// ncp.NewVersion = false // test previous version
+	// tc = run(tc)
+	// ncp.NewVersion = true // test new version
 	tc = run(tc)
 	testResult = append(testResult, tc)
 
@@ -108,9 +108,9 @@ func TestBaseAnd2LowTpHighLat(t *testing.T) {
 	tc.mockConfigs["1"] = &lowTpHighLatConf
 	tc.mockConfigs["2"] = &highLatConf
 
-	ncp.NewVersion = false // test previous version
-	tc = run(tc)
-	ncp.NewVersion = true // test new version
+	// ncp.NewVersion = false // test previous version
+	// tc = run(tc)
+	// ncp.NewVersion = true // test new version
 	tc = run(tc)
 	testResult = append(testResult, tc)
 
@@ -132,9 +132,9 @@ func TestBaseAnd3LowTpHighLat(t *testing.T) {
 	tc.mockConfigs["2"] = &highLatConf
 	tc.mockConfigs["3"] = &lowTpHighLatConf
 
-	ncp.NewVersion = false // test previous version
-	tc = run(tc)
-	ncp.NewVersion = true // test new version
+	// ncp.NewVersion = false // test previous version
+	// tc = run(tc)
+	// ncp.NewVersion = true // test new version
 	tc = run(tc)
 	testResult = append(testResult, tc)
 
@@ -157,9 +157,9 @@ func TestBaseAnd4LowTpHighLat(t *testing.T) {
 	tc.mockConfigs["3"] = &lowTpHighLatConf
 	tc.mockConfigs["4"] = &highLatConf
 
-	ncp.NewVersion = false // test previous version
-	tc = run(tc)
-	ncp.NewVersion = true // test new version
+	// ncp.NewVersion = false // test previous version
+	// tc = run(tc)
+	// ncp.NewVersion = true // test new version
 	tc = run(tc)
 	testResult = append(testResult, tc)
 
@@ -168,9 +168,9 @@ func TestBaseAnd4LowTpHighLat(t *testing.T) {
 
 func run(tc *TestCase) *TestCase {
 	version := "new version"
-	if !ncp.NewVersion {
-		version = "prev version"
-	}
+	// if !ncp.NewVersion {
+	// 	version = "prev version"
+	// }
 	fmt.Printf("\n>>>>>> Case %v, %v, %v\n", id, version, tc.name)
 
 	var testSess TestSession
@@ -198,13 +198,13 @@ func run(tc *TestCase) *TestCase {
 
 	testSess.remoteSess.PrintStatic()
 
-	if ncp.NewVersion {
-		tc.newVersionDuration = duration
-		tc.newVersionSpeed = speed
-	} else {
-		tc.oldVersionDuration = duration
-		tc.oldVersionSpeed = speed
-	}
+	// if ncp.NewVersion {
+	tc.newVersionDuration = duration
+	tc.newVersionSpeed = speed
+	// } else {
+	// 	tc.oldVersionDuration = duration
+	// 	tc.oldVersionSpeed = speed
+	// }
 
 	<-writeChan // bytesSent
 	timeStart = <-writeChan

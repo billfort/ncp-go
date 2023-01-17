@@ -19,7 +19,7 @@ const (
 )
 
 // FXB, to compare previous version and new version performance. Related code will be removed when submitting PR
-var NewVersion bool = true
+// var NewVersion bool = true
 
 type Session struct {
 	config           *Config
@@ -141,11 +141,11 @@ func (session *Session) GetBytesRead() uint64 {
 	session.RLock()
 	defer session.RUnlock()
 
-	if !NewVersion {
-		return session.bytesRead
-	} else {
-		return session.bytesReceived
-	}
+	// if !NewVersion {
+	// 	return session.bytesRead
+	// } else {
+	return session.bytesReceived
+	// }
 
 }
 
@@ -253,9 +253,9 @@ func (session *Session) ReceiveWith(localClientID, remoteClientID string, buf []
 		}
 
 		// FXB, resend the Nack sequence id data
-		if NewVersion && packet.NackSeq > 0 {
-			session.resendChan <- packet.NackSeq
-		}
+		// if NewVersion && packet.NackSeq > 0 {
+		// 	session.resendChan <- packet.NackSeq
+		// }
 
 		var ackStartSeq, ackEndSeq uint32
 		for i := 0; i < count; i++ {
@@ -297,9 +297,9 @@ func (session *Session) ReceiveWith(localClientID, remoteClientID string, buf []
 
 		// FXB
 		conn.updateEtp()
-		if NewVersion {
-			session.UpdateConnWindowSize()
-		}
+		//		if NewVersion {
+		session.UpdateConnWindowSize()
+		//		}
 	}
 
 	if packet.BytesRead > session.remoteBytesRead {
@@ -319,19 +319,19 @@ func (session *Session) ReceiveWith(localClientID, remoteClientID string, buf []
 			if _, ok := session.recvWindowData[packet.SequenceId]; !ok {
 				// FXB, if it is recvWindowStartSeq, we receive it no matter recv window size.
 				if packet.SequenceId != session.recvWindowStartSeq {
-					if !NewVersion {
-						if session.recvWindowUsed+uint32(len(packet.Data)) > session.recvWindowSize {
-							session.nRecvWindowFull++
-							return ErrRecvWindowFull
-						}
-					} else {
-						// Because receiver may wait for seme sequence data, have to buffer more data
-						// suggest it as double of send buffer.
-						if session.recvWindowUsed+uint32(len(packet.Data)) > session.recvWindowSize*2 {
-							session.nRecvWindowFull++
-							return ErrRecvWindowFull
-						}
+					// if !NewVersion {
+					// 	if session.recvWindowUsed+uint32(len(packet.Data)) > session.recvWindowSize {
+					// 		session.nRecvWindowFull++
+					// 		return ErrRecvWindowFull
+					// 	}
+					// } else {
+					// Because receiver may wait for seme sequence data, have to buffer more data
+					// suggest it as double of send buffer.
+					if session.recvWindowUsed+uint32(len(packet.Data)) > session.recvWindowSize*2 {
+						session.nRecvWindowFull++
+						return ErrRecvWindowFull
 					}
+					// }
 				}
 
 				session.recvWindowData[packet.SequenceId] = packet.Data
@@ -406,9 +406,9 @@ func (session *Session) startCheckBytesRead() error {
 		updateTime := session.bytesReadUpdateTime
 
 		bytesRead := session.bytesReceived // FXB, return back byte received by session
-		if !NewVersion {
-			bytesRead = session.bytesRead // return back byte read by application
-		}
+		// if !NewVersion {
+		// 	bytesRead = session.bytesRead // return back byte read by application
+		// }
 
 		session.RUnlock()
 

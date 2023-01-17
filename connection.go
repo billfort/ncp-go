@@ -95,15 +95,15 @@ func (conn *Connection) ReceiveAck(sequenceID uint32, isSentByMe bool) {
 		return
 	}
 
-	if _, ok := conn.resentSeq[sequenceID]; !ok {
+	// if _, ok := conn.resentSeq[sequenceID]; !ok {
 
-		if !NewVersion {
-			conn.windowSize++
-			if conn.windowSize > uint32(conn.session.config.MaxConnectionWindowSize) {
-				conn.windowSize = uint32(conn.session.config.MaxConnectionWindowSize)
-			}
-		}
-	}
+	// 	if !NewVersion {
+	// 		conn.windowSize++
+	// 		if conn.windowSize > uint32(conn.session.config.MaxConnectionWindowSize) {
+	// 			conn.windowSize = uint32(conn.session.config.MaxConnectionWindowSize)
+	// 		}
+	// 	}
+	// }
 
 	if isSentByMe {
 		rtt := time.Since(t)
@@ -287,17 +287,17 @@ func (conn *Connection) sendAck() error {
 			AckSeqCount: ackSeqCountList,
 			BytesRead:   conn.session.GetBytesRead(),
 		}
-		if NewVersion {
-			// if recvWindow used is over 80%, send NACK to sender to resend it asap.
-			if float64(conn.session.RecvWindowUsed()) > float64(conn.session.recvWindowSize)*0.8 {
-				if conn.session.recvWindowStartSeq > conn.session.nackSeq &&
-					time.Since(conn.session.recvWindowStartSeqStart) >
-						time.Duration(4*conn.session.config.SendAckInterval)*time.Millisecond {
-					// pack.NackSeq = conn.session.recvWindowStartSeq
-					// conn.session.nackSeq = conn.session.recvWindowStartSeq
-				}
-			}
-		}
+		// if NewVersion {
+		// // if recvWindow used is over 80%, send NACK to sender to resend it asap.
+		// if float64(conn.session.RecvWindowUsed()) > float64(conn.session.recvWindowSize)*0.8 {
+		// 	if conn.session.recvWindowStartSeq > conn.session.nackSeq &&
+		// 		time.Since(conn.session.recvWindowStartSeqStart) >
+		// 			time.Duration(4*conn.session.config.SendAckInterval)*time.Millisecond {
+		// 		// pack.NackSeq = conn.session.recvWindowStartSeq
+		// 		// conn.session.nackSeq = conn.session.recvWindowStartSeq
+		// 	}
+		// }
+		// }
 
 		buf, err := proto.Marshal(pack)
 		if err != nil {
@@ -339,12 +339,12 @@ func (conn *Connection) checkTimeout() error {
 				case conn.session.resendChan <- seq:
 					conn.resentSeq[seq] = struct{}{}
 					// Previous version
-					if !NewVersion {
-						conn.windowSize /= 2
-						if conn.windowSize < uint32(conn.session.config.MinConnectionWindowSize) {
-							conn.windowSize = uint32(conn.session.config.MinConnectionWindowSize)
-						}
-					}
+					// if !NewVersion {
+					// 	conn.windowSize /= 2
+					// 	if conn.windowSize < uint32(conn.session.config.MinConnectionWindowSize) {
+					// 		conn.windowSize = uint32(conn.session.config.MinConnectionWindowSize)
+					// 	}
+					// }
 
 					conn.numTimeout++
 				case <-conn.session.context.Done():
