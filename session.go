@@ -3,6 +3,7 @@ package ncp
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"net"
 	"strings"
@@ -272,6 +273,9 @@ func (session *Session) ReceiveWith(localClientID, remoteClientID string, buf []
 	}
 
 	if isEstablished && packet.SequenceId > 0 {
+		fmt.Printf("ncp conn %v received seq %v recvWindowStartSeq %v\n",
+			localClientID, packet.SequenceId, session.recvWindowStartSeq)
+
 		if uint32(len(packet.Data)) > session.recvMtu {
 			return ErrDataSizeTooLarge
 		}
@@ -295,7 +299,18 @@ func (session *Session) ReceiveWith(localClientID, remoteClientID string, buf []
 		}
 
 		if conn, ok := session.connections[connKey(localClientID, remoteClientID)]; ok {
+			// for _, conn := range session.connections {
+			fmt.Printf("ncp conn %v received seq %v recvWindowStartSeq %v, push to conn ack heap\n",
+				conn.localClientID, packet.SequenceId, session.recvWindowStartSeq)
 			conn.SendAck(packet.SequenceId)
+		} else {
+			fmt.Printf("ncp conn %v not exist, localId %v, remoteId %v\n", localClientID, localClientID, remoteClientID)
+			if localClientID == "0" {
+				for key, conn := range session.connections {
+					fmt.Printf("key %v, conn +%v\n", key, conn)
+				}
+				log.Fatal("conn not exist, session.connections len: ", len(session.connections))
+			}
 		}
 	}
 
@@ -716,6 +731,8 @@ func (session *Session) Read(b []byte) (_ int, e error) {
 		session.RUnlock()
 		if ok {
 			break
+		} else {
+			// fmt.Printf("ncp reader is waiting for seq %v\n", session.recvWindowStartSeq)
 		}
 
 		select {

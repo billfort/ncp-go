@@ -175,6 +175,11 @@ func (conn *Connection) tx() error {
 			}
 			time.Sleep(time.Second)
 			continue
+		} else {
+			log.Printf("ncp conn %v sent seq %v, window size %.0f\n", conn.localClientID, seq, conn.windowSize)
+			if conn.localClientID == "0" && conn.windowSize < 2 {
+				log.Fatal("conn 0 window size is 1, exit now")
+			}
 		}
 
 		conn.Lock()
